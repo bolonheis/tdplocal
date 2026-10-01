@@ -1,0 +1,148 @@
+global:
+  security:
+    allowInsecureImages: true
+
+tdp-hive-metastore:
+  enabled: true
+
+  # Common labels applied to TDP helper jobs (RBAC/db-create/db-check/cleanup)
+  # AND, per the upstream hive-metastore chart's templates, directly to the
+  # metastore and postgres Deployments' own metadata.labels (as well as their
+  # selector/pod-template labels) — verified via `helm template`, exactly
+  # once per resource. The tecnisys.com/* pair opts those Deployments into
+  # tdp-license-operator enforcement — see
+  # stack/manifests/platform/tdp-platform-license.yaml (one shared whole-platform policy). Remove the two
+  # tecnisys.com/* labels to opt this chart out of enforcement.
+  commonLabels:
+    tecnisys.io/cluster: tdp
+    tecnisys.com/licensed: "true"
+    tecnisys.com/product: tdp-hive-metastore
+
+  # Image pull secrets for pulling images from private registries
+  imagePullSecrets:
+    - name: tdp-registry
+
+  # Security defaults used by helper jobs and upstream workloads.
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    seccompProfile:
+      type: RuntimeDefault
+    capabilities:
+      drop:
+        - ALL
+
+  # PostgreSQL configuration.
+  # - enabled=true: use the embedded PostgreSQL (upstream subchart).
+  # - enabled=false: use an external PostgreSQL (and enable TDPConfigurations.externalDatabase).
+  postgres:
+    enabled: true
+
+    # External PostgreSQL endpoint (only used when postgres.enabled=false).
+    external:
+      host: "<POSTGRESQL_HOST>"
+      port: 5432
+
+    # Database settings (used by both internal and external).
+    # Credentials always reach the metastore through the Secret <release>-hive-database
+    # (keys username/password/database), never through the ConfigMap:
+    # - enabled=true: the chart renders that Secret from the values below.
+    # - enabled=false + TDP-Settings.externalDatabase.enabled=true: the db-create-job
+    #   hook creates it with a generated password (password below is unused).
+    # - enabled=false without the hooks: create the Secret yourself before installing.
+    database: hive
+    username: hive
+    password: "hive"
+
+    # Security context overrides specific to the internal postgres Deployment.
+    # runAsUser: 999 (postgres uid) causes the entrypoint to skip the root-level
+    # chown/chmod initialization — required when capabilities.drop: ALL is enforced.
+    # fsGroup: 999 ensures the PVC is accessible to the postgres group.
+    podSecurityContext:
+      fsGroup: 999
+      seccompProfile:
+        type: RuntimeDefault
+    containerSecurityContext:
+      runAsUser: 999
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: false
+      seccompProfile:
+        type: RuntimeDefault
+      capabilities:
+        drop:
+          - ALL
+
+  # Metastore configuration.
+  # Define the type of metastore storage: 'file' or 's3'.
+  metastore:
+    # Chart and image ship together: this chart requires 4.0.0-2+.
+    image: registry.tecnisys.com.br/tdp/images/hive-metastore:4.0.0-2
+    type: file
+
+    # Number of metastore replicas (also used by the connection-pool guard).
+    # Under ArgoCD, ignore /spec/replicas in the Application so self-heal does not
+    # undo tdp-license-operator's scale-to-zero (see README).
+    replicas: 1
+
+    file:
+      warehouseDir: /opt/hive/warehouse
+
+    # S3 settings used when metastore.type=s3 (e.g. tdp-ozone's S3 Gateway on :9878).
+    # accessKey/secretKey are rendered into the Secret <release>-hive-s3.
+    s3:
+      warehouseDir: s3a://warehouse/hive
+      bucket: warehouse
+      endpoint: "http://<S3_SERVICE>.<NAMESPACE>.svc.cluster.local:9878"
+      accessKey: "<S3_ACCESS_KEY>"
+      secretKey: "<S3_SECRET_KEY>"
+      pathStyleAccess: true
+      region: us-east-1
+
+    # Thrift server worker threads.
+    minThreads: 20
+    maxThreads: 200
+
+    # JDBC connection pools (HikariCP). Per replica Hive opens objectstore, txn and
+    # mutex pools of up to maxPoolSize each, plus ~15 fixed connections
+    # (objectstore-secondary 2, compactor 5, objectstore-compactor 5).
+    # Peak per replica ≈ 3 × maxPoolSize + 15 (150 ⇒ 465).
+    # PostgreSQL max_connections ≥ (3 × maxPoolSize + 15) × replicas + other clients.
+    # With the internal PostgreSQL the render fails when this does not hold.
+    connectionPool:
+      maxPoolSize: 150  # -> datanucleus.connectionPool.maxPoolSize
+      minPoolSize: 10   # -> hikaricp.minimumIdle (idle floor per pool; ~40 idle connections per replica)
+
+    resources:
+      requests:
+        cpu: "1"
+        memory: 3Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+
+    # JVM heap: heapSize ("3g", "3072m") fixes -Xmx; when empty the heap is
+    # maxRAMPercentage of resources.limits.memory (75% of 4Gi ≈ 3Gi).
+    jvm:
+      heapSize: ""
+      maxRAMPercentage: 75
+      extraOpts: ""
+
+# TDP-specific settings (hooks and integrations)
+TDP-Settings:
+  externalDatabase:
+    # Enable TDP database hooks that validate/provision an external PostgreSQL.
+    # This should be used together with: tdp-hive-metastore.postgres.enabled=false
+    enabled: false
+
+    # If true, the db-create-job will drop and recreate the database/user when installing/upgrading.
+    recreate: false
+
+    # Secret containing the superuser password used by the db-create/db-check jobs.
+    # Expected key: postgres-password
+    externalSecret:
+      releaseName: "tdp-postgresql-project"

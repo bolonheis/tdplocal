@@ -1,0 +1,6 @@
+# Local variables (credentials): copy variables.env to variables.env.local.
+variables.env.local
+
+# Rendered Secrets carry the git and registry credentials from variables.env.
+# deploy.sh applies them with kubectl; they must never be committed.
+current/common/*-secret.yaml

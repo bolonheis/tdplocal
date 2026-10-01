@@ -1,0 +1,323 @@
+# ==============================================================================
+# TDP (Tecnisys Data Platform) - Tecnisys
+# Helm chart values for Trino
+#
+# Usage:
+# - Edit this file to configure the chart.
+# - Prefer placeholders over real secrets; provide sensitive values via
+#   Kubernetes Secrets or external tooling.
+# - Keep a single source of truth: values.yaml.
+# ==============================================================================
+
+tdp-trino:
+  enabled: true
+  commonLabels:
+    tecnisys.io/cluster: tdp
+  # Cluster label for selector compatibility with kustomize post-renderer
+  clusterLabel: "tdp"
+
+  image:
+    tag: "478"
+
+  # Resource names are derived from Helm release name by default.
+  fullnameOverride: ""
+  coordinatorNameOverride: ""
+  workerNameOverride: ""
+
+  service:
+    annotations: {}
+    type: ClusterIP
+    port: 8080
+
+  server:
+    workers: 2
+    node:
+      environment: "environment"
+    config:
+      # HTTPS configuration - dynamically enabled based on LDAP
+      https:
+        enabled: false
+        port: 8443
+        keystore:
+          path: ""
+
+      # Authentication type - dynamically set based on LDAP
+      authenticationType: ""
+
+    workerExtraConfig: ""
+    coordinatorExtraConfig: |
+      http-server.process-forwarded=true
+
+    autoscaling:
+      enabled: true
+      maxReplicas: 5
+      targetCPUUtilizationPercentage: 50
+      targetMemoryUtilizationPercentage: 80
+      behavior: {}
+
+    keda:
+      enabled: false
+      pollingInterval: 30
+      cooldownPeriod: 300
+      initialCooldownPeriod: 0
+      minReplicaCount: 0
+      maxReplicaCount: 5
+      fallback: {}
+      advanced: {}
+      triggers: []
+      annotations: {}
+
+  # Trino catalogs configuration
+  # Each catalog defines a data source connector
+  catalogs:
+    # TPC-H: Benchmark data generator
+    tpch: |
+      connector.name=tpch
+      tpch.splits-per-node=4
+
+    # TPC-DS: Benchmark data generator
+    tpcds: |
+      connector.name=tpcds
+      tpcds.splits-per-node=4
+
+    # Memory: In-memory temporary tables
+    memory: |
+      connector.name=memory
+
+    # Example: Add PostgreSQL connector
+    # postgresql: |
+    #   connector.name=postgresql
+    #   connection-url=jdbc:postgresql://<host>:<port>/<database>
+    #   connection-user=<username>
+    #   connection-password=<password>
+
+    # Example: Add ClickHouse connector
+    # clickhouse: |
+    #   connector.name=clickhouse
+    #   connection-url=jdbc:clickhouse://<host>:<port>/<database>
+    #   connection-user=<username>
+    #   connection-password=<password>
+
+    # Example: Add Kafka connector
+    # kafka: |
+    #   connector.name=kafka
+    #   kafka.nodes=<broker1:9092,broker2:9092>
+    #   kafka.table-description-dir=/etc/trino/kafka
+
+    # Example: Add Hive/Iceberg connectors with S3
+    # hive: |
+    #   connector.name=hive
+    #   hive.metastore.uri=thrift://<hive-metastore-service>:9083
+    #   fs.native-s3.enabled=true
+    #   s3.endpoint=<s3-endpoint>
+    #   s3.aws-access-key=<s3-access-key>
+    #   s3.aws-secret-key=<s3-secret-key>
+    #   s3.path-style-access=true
+
+  # Additional configuration - dynamically set based on LDAP
+  additionalConfigProperties: []
+
+  accessControl: {}
+
+  # Security context - compatible with both Kubernetes vanilla and OpenShift
+  securityContext:
+    runAsUser: null
+    runAsGroup: null
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+  coordinator:
+    # Opts this Deployment into Tecnisys licensing enforcement. Governed by
+    # the whole-platform LicensePolicy/PlatformLicense named "tdp-platform"
+    # (see stack/manifests/platform/tdp-platform-license.yaml) — requires
+    # tdp-license-crds and tdp-license-operator to be installed. Remove
+    # these two labels (here and under worker.labels below) to opt this
+    # chart out of enforcement.
+    labels:
+      tecnisys.com/licensed: "true"
+      tecnisys.com/product: tdp-trino
+    # Resource limits and requests for the Trino coordinator
+    # Adjust based on your workload requirements
+    resources:
+      requests:
+        cpu: "1"
+        memory: "2Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+    additionalVolumes:
+      - name: data-volume
+        emptyDir: {}
+    additionalVolumeMounts:
+      - name: data-volume
+        mountPath: /data/trino
+    additionalConfigFiles: {}
+    additionalJVMConfig: []
+
+  worker:
+    labels:
+      tecnisys.com/licensed: "true"
+      tecnisys.com/product: tdp-trino
+    # Resource limits and requests for Trino workers
+    # Adjust based on your workload requirements
+    # Workers handle query execution, so they typically need more resources
+    resources:
+      requests:
+        cpu: "1"
+        memory: "2Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+    additionalVolumes:
+      - name: data-volume
+        emptyDir: {}
+    additionalVolumeMounts:
+      - name: data-volume
+        mountPath: /data/trino
+    additionalJVMConfig: []
+
+    # Spread workers evenly across nodes (at most 1 worker of difference
+    # between any two nodes). ScheduleAnyway: never leaves a worker Pending
+    # on small or single-node clusters. matchLabelKeys scopes the count to
+    # the worker's own ReplicaSet, so a rolling update or another Trino
+    # release in the namespace does not skew placement. The selector is
+    # literal because the vendored chart renders this with toYaml (no tpl):
+    # setting tdp-trino.nameOverride silently disables spreading. Set to []
+    # to disable.
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: tdp-trino
+            app.kubernetes.io/component: worker
+        matchLabelKeys:
+          - pod-template-hash
+
+    # Drain running tasks before a worker stops (HPA/KEDA scale-down,
+    # rollout, node drain). There is no retry-policy configured, so without
+    # this every stopped worker fails the queries that had tasks on it.
+    # The vendored chart adds a preStop hook (PUT /v1/info/state on
+    # http://localhost:8080 as user "admin") and requires
+    # terminationGracePeriodSeconds >= 2 x gracePeriodSeconds. Conflicts
+    # with worker.lifecycle.
+    gracefulShutdown:
+      enabled: true
+      gracePeriodSeconds: 120
+    terminationGracePeriodSeconds: 300
+
+  jmx:
+    enabled: true
+
+  serviceMonitor:
+    enabled: false
+    labels: {}
+    # iceberg: |
+    #   connector.name=iceberg
+    #   iceberg.catalog.type=hive_metastore
+    #   hive.metastore.uri=thrift://<hive-metastore-service>:9083
+    #   fs.native-s3.enabled=true
+    #   s3.endpoint=<s3-endpoint>
+    #   s3.aws-access-key=<s3-access-key>
+    #   s3.aws-secret-key=<s3-secret-key>
+    #   s3.path-style-access=true
+
+
+# PodDisruptionBudget for the workers only (voluntary disruptions such as
+# node drains). The coordinator is a single replica and intentionally has
+# no PDB: minAvailable 1 on it would block every drain of its node. Does
+# not apply to HPA/KEDA scale-down (the ReplicaSet deletes pods directly);
+# that case is covered by tdp-trino.worker.gracefulShutdown.
+workerPodDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+# PVC configuration for Trino certificates (disabled by default)
+trinoCerts:
+  pvc:
+    enabled: false
+    name: "trino-certs-pvc"
+    accessModes:
+      - ReadWriteOnce
+    size: "1Gi"
+    # storageClassName: ""  # Leave empty for default storage class
+  
+  secret:
+    enabled: false
+    name: "tdp-trino-certs-secret"
+  
+  copyJob:
+    enabled: false
+    name: "tdp-trino-copy-certs"
+    image: "registry.tecnisys.com.br/community/images/busybox:1.36"
+
+# Gateway API configuration for exposing Trino UI
+# Used when TDP-Settings.gateway.gatewayApi.enabled is true
+gatewayApi:
+  # Gateway reference - the Gateway resource to attach HTTPRoutes to
+  gatewayClassName: ""
+  # Gateway resource configuration
+  gateway:
+    enabled: false
+    name: ""
+    listeners: []
+  # Parent Gateway references - must be configured with actual Gateway name
+  # Example:
+  # parentRefs:
+  #   - name: my-gateway
+  #     namespace: gateway-system
+  #     sectionName: https  # Optional: specific listener name
+  parentRefs: []
+  
+  # Trino HTTPRoute configuration
+  trino:
+    enabled: true
+    hostnames:
+      - trino.${TDP_DOMAIN}
+    rules:
+      - matches:
+          - path:
+              type: PathPrefix
+              value: /
+        backendRefs:
+          - name: ""  # Will be set to the trino service name in template
+            port: 8080
+    # Optional: TLS configuration via Gateway
+    tls:
+      certificateRefs: []
+      # - name: trino-tls
+      #   namespace: default
+
+# Ingress configuration for exposing Trino
+# Used when TDP-Settings.gateway.ingress.enabled is true
+# trino.${TDP_DOMAIN}     - JDBC/HTTP API endpoint for query clients
+# trino-ui.${TDP_DOMAIN}  - Web UI for monitoring queries and cluster status
+ingress:
+  ingressClassName: "nginx"
+  annotations: {}
+  hosts:
+    - trino.${TDP_DOMAIN}
+  tls: []
+
+# LDAP authentication configuration
+# Set enabled: true and use values-tdp-ldap.yaml to enable LDAP authentication
+ldap:
+  enabled: false
+
+# TDP-specific configurations
+TDP-Settings:
+  # Gateway configuration controls which network exposure method is used
+  gateway:
+    # Enable Kubernetes Ingress resources for Trino
+    # When true, Ingress resources will be created based on the 'trino.ingress' section above
+    ingress:
+      enabled: false
+    # Enable Kubernetes Gateway API resources for Trino
+    # When true, HTTPRoute resources will be created based on the 'gatewayApi' section above
+    # Note: Gateway API and Ingress are mutually exclusive - only one should be enabled
+    gatewayApi:
+      enabled: false

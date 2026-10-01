@@ -1,0 +1,418 @@
+# ==============================================================================
+# TDP (Tecnisys Data Platform) - Tecnisys
+# Helm chart values for Apache Ranger
+#
+# Usage:
+# - Edit this file to configure the chart.
+# - Prefer placeholders over real secrets; provide secrets via Kubernetes Secret
+#   or via Helm --set / external tooling.
+# - Keep a single source of truth: values.yaml.
+# - Avoid environment-specific values files as the primary source of truth.
+# ==============================================================================
+
+tdp-ranger:
+  enabled: true
+  # Cluster label for selector compatibility
+  clusterLabel: "tdp"
+
+  # tdp-license-operator enforcement (tecnisys.com/licensed, tecnisys.com/product
+  # — see stack/manifests/platform/tdp-platform-license.yaml, the shared
+  # whole-platform policy also used by tdp-trino/tdp-argo/tdp-clickhouse/
+  # tdp-hive-metastore): commonLabels below is merged into apache-ranger.labels
+  # (stack/charts/upstream/ranger/apache-ranger/templates/_helpers.tpl) and
+  # reaches all 5 Deployments' own metadata.labels (ranger, ranger-db,
+  # ranger-solr, ranger-zk, ranger-usersync) — license expiry scales the
+  # whole Ranger stack together. Deliberately kept separate from
+  # `clusterLabel` above (which already emits tecnisys.io/cluster on its
+  # own) to avoid emitting that key twice. Remove the two tecnisys.com/*
+  # keys below to opt this chart out of enforcement.
+  commonLabels:
+    tecnisys.com/licensed: "true"
+    tecnisys.com/product: tdp-ranger
+
+  imagePullSecrets:
+    - name: tdp-registry
+
+  # Optional mounts for external integration assets, such as a dedicated
+  # Ranger client keystore/truststore used to call NiFi over SSL. Wired into
+  # ranger-deployment.yaml's initContainers/volumes/volumeMounts (main Ranger
+  # admin pod only) — see values-nifi-ranger-authorizer.yaml for a real
+  # consumer.
+  extraInitContainers: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  podSecurityContext: {}
+
+  postgres:
+    enabled: true
+
+  ranger:
+    # Admin credentials
+    adminUser: "admin"
+    # Required when rangerIntegrations.configJob.enabled is true.
+    # Use a strong password (minimum 8 chars with uppercase, lowercase, number, and special char).
+    # This default is an example and must be changed before production use.
+    adminPassword: "ChangeMe!2026"
+    # Optional: source the admin password from an existing Secret instead of
+    # the literal above. Leave adminExistingSecret empty to keep the literal
+    # (default, unchanged behavior). Mirrors existingSecret/
+    # existingSecretPasswordKey below (used for the DB password) — the
+    # Secret must be created out-of-band by the operator (same convention as
+    # ldap.bind.passwordSecret), e.g.:
+    #   kubectl create secret generic ranger-admin-credentials \
+    #     --from-literal=password='<strong-password>' -n <namespace>
+    adminExistingSecret: ""
+    adminExistingSecretPasswordKey: "password"
+    # Database credentials
+    dbUser: "ranger"
+    # This default is an example and must be changed before production use.
+    dbPassword: "ChangeMe!2026"  # Default value when not using an existing Secret
+    #dbName is set to default `ranger`, cannot be modified
+    # Use secret created by db-create-job (name will be constructed in template)
+    existingSecret: "{{ .Release.Name }}-ranger-database"
+    existingSecretPasswordKey: "password"
+
+    # Database configuration
+    database:
+      # Database host (will use external if provided)
+      host: "<postgresql-service>.<namespace>.svc.cluster.local"
+      # Database port (default PostgreSQL port)
+      port: 5432
+
+  solr:
+    persistence:
+      enabled: true
+      size: "1Gi"
+      storageClassName: ""
+
+  # LDAP/AD Authentication Configuration
+  ldap:
+    enabled: false
+    connection:
+      url: "ldap://<ldap-host>:389"
+    bind:
+      dn: "cn=<ldap-bind-user>,dc=<example>,dc=com"
+      passwordSecret:
+        name: "tdp-ranger-ldap-secret"
+        key: "bind-password"
+    baseDn: "dc=<example>,dc=com"
+
+  # Ranger UserSync Configuration
+  usersync:
+    enabled: false
+    image:
+      repository: "registry.tecnisys.com.br/tdp/images/ranger-usersync"
+      # 2.7.0-0 is the published tag (2.7.0 was never pushed, in /tdp-dev or /tdp).
+      tag: "2.7.0-0"
+      pullPolicy: IfNotPresent
+    syncSource: "unix"
+    syncInterval: 360
+    resources:
+      limits:
+        cpu: 500m
+        memory: 1Gi
+      requests:
+        cpu: 100m
+        memory: 256Mi
+
+  # Values consumed by the apache-ranger dependency (subchart)
+  rangerIntegrations:
+    kafka:
+      enabled: false
+      serviceName: "tdp_kafka"
+      serviceDisplayName: "TDP Kafka Cluster"
+      connection:
+        bootstrapServers: "<kafka-bootstrap-servers>"
+        zookeeperConnect: "<zookeeper-connect>"
+        securityProtocol: "PLAINTEXT"
+      credentials:
+        username: "<kafka-username>"
+        password: "<kafka-password>"
+      defaultPolicies: []
+    nifi:
+      enabled: false
+      serviceName: "tdp_nifi"
+      serviceDisplayName: "TDP NiFi Cluster"
+      technicalUsers: []
+      tlsClientCertificate:
+        autoGenerate:
+          enabled: false
+          secretName: "ranger-nifi-client-tls"
+          # Existing Secret containing the password used by cert-manager to
+          # generate keystore.jks and truststore.jks. This Secret is not
+          # created by the chart; keep it stable across upgrades/reinstalls.
+          passwordSecretName: "ranger-nifi-client-tls-password"
+          passwordSecretKey: "password"
+          issuerRef:
+            name: "nifi-issuer"
+            kind: "Issuer"
+            group: "cert-manager.io"
+          commonName: "ranger-nifi-client"
+          dnsNames:
+            - "ranger-nifi-client"
+          duration: "2160h"
+          renewBefore: "360h"
+          usages:
+            - "client auth"
+            - "digital signature"
+            - "key encipherment"
+      connection:
+        nifiUrl: "<nifi-url>/nifi-api/resources"
+        internalUrl: "<nifi-internal-url>/nifi-api/resources"
+        authenticationType: "SSL"
+        sslUseDefaultContext: "false"
+        ssl:
+          keystore: ""
+          keystoreType: "jks"
+          keystorePassword: ""
+          keystorePasswordSecret:
+            name: ""
+            key: ""
+          truststore: ""
+          truststoreType: "jks"
+          truststorePassword: ""
+          truststorePasswordSecret:
+            name: ""
+            key: ""
+        additionalConfigs:
+          policy.download.auth.users: "nifi"
+      credentials:
+        username: ""
+        password: ""
+      defaultPolicies: []
+    trino:
+      enabled: false
+      serviceName: "tdp_trino"
+      serviceDisplayName: "TDP Trino Cluster"
+      connection:
+        jdbcUrl: "<trino-jdbc-url>"
+        jdbcDriverClassName: "io.trino.jdbc.TrinoDriver"
+      credentials:
+        username: "<trino-username>"
+        password: "<trino-password>"
+      defaultPolicies: []
+
+# Values exposed to all subcharts that support Helm global values
+global:
+  rangerIntegrations:
+    kafka:
+      enabled: false
+      serviceName: "tdp_kafka"
+      serviceDisplayName: "TDP Kafka Cluster"
+      connection:
+        bootstrapServers: "<kafka-bootstrap-servers>"
+        zookeeperConnect: "<zookeeper-connect>"
+        securityProtocol: "PLAINTEXT"
+      credentials:
+        username: "<kafka-username>"
+        password: "<kafka-password>"
+      defaultPolicies: []
+    nifi:
+      enabled: false
+      serviceName: "tdp_nifi"
+      serviceDisplayName: "TDP NiFi Cluster"
+      tlsClientCertificate:
+        autoGenerate:
+          enabled: false
+          secretName: "ranger-nifi-client-tls"
+          # Existing Secret containing the password used by cert-manager to
+          # generate keystore.jks and truststore.jks. This Secret is not
+          # created by the chart; keep it stable across upgrades/reinstalls.
+          passwordSecretName: "ranger-nifi-client-tls-password"
+          passwordSecretKey: "password"
+          issuerRef:
+            name: "nifi-issuer"
+            kind: "Issuer"
+            group: "cert-manager.io"
+          commonName: "ranger-nifi-client"
+          dnsNames:
+            - "ranger-nifi-client"
+          duration: "2160h"
+          renewBefore: "360h"
+          usages:
+            - "client auth"
+            - "digital signature"
+            - "key encipherment"
+      connection:
+        nifiUrl: "<nifi-url>/nifi-api/resources"
+        internalUrl: "<nifi-internal-url>/nifi-api/resources"
+        authenticationType: "SSL"
+        sslUseDefaultContext: "false"
+        ssl:
+          keystore: ""
+          keystoreType: "jks"
+          keystorePassword: ""
+          keystorePasswordSecret:
+            name: ""
+            key: ""
+          truststore: ""
+          truststoreType: "jks"
+          truststorePassword: ""
+          truststorePasswordSecret:
+            name: ""
+            key: ""
+        additionalConfigs:
+          policy.download.auth.users: "nifi"
+      credentials:
+        username: ""
+        password: ""
+      defaultPolicies: []
+    trino:
+      enabled: false
+      serviceName: "tdp_trino"
+      serviceDisplayName: "TDP Trino Cluster"
+      connection:
+        jdbcUrl: "<trino-jdbc-url>"
+        jdbcDriverClassName: "io.trino.jdbc.TrinoDriver"
+      credentials:
+        username: "<trino-username>"
+        password: "<trino-password>"
+      defaultPolicies: []
+
+# Values used by tdp-ranger templates (integration setup job and configmap)
+rangerIntegrations:
+  # Job that configures services and policies in Ranger
+  configJob:
+    enabled: false
+    image: "registry.tecnisys.com.br/community/images/python:3.11-slim"
+    imagePullPolicy: IfNotPresent
+    # How long the Job waits for the Ranger API (init container and main
+    # container share this budget). Matches the Ranger startupProbe budget:
+    # the first start imports the DB schema and was measured at ~960s.
+    rangerReadyTimeout: 1800
+    retryInterval: 10
+    # Hard limit for the whole Job. Empty = rangerReadyTimeout + 600s left
+    # for configuring services and policies once Ranger answers.
+    activeDeadlineSeconds: ""
+
+  # Integrations are disabled by default
+  kafka:
+    enabled: false
+    serviceName: "tdp_kafka"
+    serviceDisplayName: "TDP Kafka Cluster"
+    connection:
+      bootstrapServers: "<kafka-bootstrap-servers>"
+      zookeeperConnect: "<zookeeper-connect>"
+      securityProtocol: "PLAINTEXT"
+    credentials:
+      username: "<kafka-username>"
+      password: "<kafka-password>"
+    defaultPolicies: []
+  nifi:
+    enabled: false
+    serviceName: "tdp_nifi"
+    serviceDisplayName: "TDP NiFi Cluster"
+    tlsClientCertificate:
+      autoGenerate:
+        enabled: false
+        secretName: "ranger-nifi-client-tls"
+        # Existing Secret containing the password used by cert-manager to
+        # generate keystore.jks and truststore.jks. This Secret is not
+        # created by the chart; keep it stable across upgrades/reinstalls.
+        passwordSecretName: "ranger-nifi-client-tls-password"
+        passwordSecretKey: "password"
+        issuerRef:
+          name: "nifi-issuer"
+          kind: "Issuer"
+          group: "cert-manager.io"
+        commonName: "ranger-nifi-client"
+        dnsNames:
+          - "ranger-nifi-client"
+        duration: "2160h"
+        renewBefore: "360h"
+        usages:
+          - "client auth"
+          - "digital signature"
+          - "key encipherment"
+    connection:
+      nifiUrl: "<nifi-url>/nifi-api/resources"
+      internalUrl: "<nifi-internal-url>/nifi-api/resources"
+      authenticationType: "SSL"
+      sslUseDefaultContext: "false"
+      ssl:
+        keystore: ""
+        keystoreType: "jks"
+        keystorePassword: ""
+        keystorePasswordSecret:
+          name: ""
+          key: ""
+        truststore: ""
+        truststoreType: "jks"
+        truststorePassword: ""
+        truststorePasswordSecret:
+          name: ""
+          key: ""
+      additionalConfigs:
+        policy.download.auth.users: "nifi"
+    credentials:
+      username: ""
+      password: ""
+    defaultPolicies: []
+  trino:
+    enabled: false
+    serviceName: "tdp_trino"
+    serviceDisplayName: "TDP Trino Cluster"
+    connection:
+      jdbcUrl: "<trino-jdbc-url>"
+      jdbcDriverClassName: "io.trino.jdbc.TrinoDriver"
+    credentials:
+      username: "<trino-username>"
+      password: "<trino-password>"
+    defaultPolicies: []
+
+# Configurations for TDP-specific connections and integrations
+TDP-Settings:
+
+  externalDatabase:
+    enabled: false
+    recreate: true
+    externalSecret:
+      # Secret name is: <releaseName>
+      # Key used by the db-create-job template: postgres-password
+      # PostgreSQL release name (defaults to "tdp-postgresql" if not specified)
+      releaseName: "tdp-postgresql"
+
+  # Gateway configuration controls which network exposure method is used
+  gateway:
+    # Enable Kubernetes Ingress resources for Ranger
+    # When true, Ingress resources will be created based on the 'ingress' section above
+    ingress:
+      enabled: false
+    # Enable Kubernetes Gateway API resources for Ranger
+    # When true, HTTPRoute resources will be created based on the 'gatewayApi' section above
+    # Note: Gateway API and Ingress are mutually exclusive - only one should be enabled
+    gatewayApi:
+      enabled: false
+
+# Gateway API configuration for exposing Ranger Admin UI
+# Used when TDP-Settings.gateway.gatewayApi.enabled is true
+gatewayApi:
+  # Gateway reference - the Gateway resource to attach HTTPRoutes to
+  gatewayClassName: ""
+  parentRefs: []
+  ranger:
+    enabled: true
+    hostnames:
+      - ranger.${TDP_DOMAIN}
+    rules:
+      - matches:
+          - path:
+              type: PathPrefix
+              value: /
+        backendRefs:
+          - name: ""
+            port: 6080
+    tls:
+      certificateRefs: []
+
+# Ingress configuration for exposing Ranger Admin UI
+# Used when TDP-Settings.gateway.ingress.enabled is true
+ingress:
+  ingressClassName: ""
+  annotations: {}
+  hosts:
+    - host: ranger.${TDP_DOMAIN}
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []

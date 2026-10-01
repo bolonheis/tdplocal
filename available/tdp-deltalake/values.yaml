@@ -1,0 +1,338 @@
+# TDP Delta Lake Maintenance Configuration
+# This chart provides Delta Lake table maintenance utilities and scheduled jobs
+
+# Global configuration
+global:
+  storageClass: "standard"
+  # Pull secret for registry.tecnisys.com.br/tdp/images/* (private): a
+  # kubernetes.io/dockerconfigjson Secret in the release namespace. Used by the
+  # Spark subchart's master/worker and by this chart's maintenance CronJobs.
+  imagePullSecrets:
+    - tdp-registry
+  security:
+    allowInsecureImages: true
+  compatibility:
+    openshift:
+      adaptSecurityContext: force
+
+spark:
+  # `commonLabels` is the vendored spark chart's chart-wide label hook. It
+  # lands on every resource's own metadata.labels (verified via `helm
+  # template`), unlike master.podLabels/worker.podLabels below, which only
+  # reach the pod template. This is where the Tecnisys licensing opt-in
+  # (tecnisys.com/licensed, tecnisys.com/product) is applied — see
+  # stack/manifests/platform/tdp-platform-license.yaml (one shared whole-platform policy) — requires
+  # tdp-license-crds and tdp-license-operator to be installed. Remove the
+  # two tecnisys.com/* labels to opt this chart out of enforcement.
+  #
+  # SCOPE NOTE: this only labels the Spark master/worker StatefulSets
+  # rendered by the vendored dependency (enabled via
+  # maintenance.spark.enabled below). The maintenance CronJobs this
+  # chart's own templates render (templates/cronjob-maintenance.yaml) use
+  # a hardcoded label helper with no values-driven extension point, so
+  # they CANNOT be labeled from values.yaml alone — see the license
+  # manifest for details.
+  commonLabels:
+    tecnisys.io/cluster: "tdp"
+    tecnisys.com/licensed: "true"
+    tecnisys.com/product: tdp-deltalake
+  image:
+    # Host and project in one string on purpose: the release pipeline rewrites
+    # registry.tecnisys.com.br/tdp/... to registry.tecnisys.com.br/tdp/...
+    # only when both appear together (a split registry:/repository: kept
+    # "tdp-dev" in production refs). Empty registry = no prefix.
+    registry: ""
+    repository: registry.tecnisys.com.br/tdp/images/spark
+    tag: 4.0.2-2
+    pullPolicy: IfNotPresent
+  master:
+    podLabels:
+      tecnisys.io/cluster: "tdp"
+  worker:
+    podLabels:
+      tecnisys.io/cluster: "tdp"
+
+# Maintenance configuration
+maintenance:
+  # Enable/disable maintenance jobs
+  enabled: true
+
+  # Spark-based maintenance jobs
+  spark:
+    enabled: true
+    image:
+      repository: "registry.tecnisys.com.br/tdp/images/spark"
+      tag: "4.0.2-2"
+      pullPolicy: IfNotPresent
+    # Extra pull secrets for the maintenance CronJobs only (global.imagePullSecrets
+    # above already applies to them). Names or {name: ...} maps.
+    imagePullSecrets: []
+
+    # Resource allocation for maintenance jobs
+    resources:
+      requests:
+        cpu: 1
+        memory: 2Gi
+      limits:
+        cpu: 2
+        memory: 4Gi
+
+    # Spark configuration for Delta Lake
+    # Delta Lake 4.0.0 is compatible with Spark 4.0.0
+    config:
+      "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension"
+      "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+      # S3A endpoint for MinIO/S3. The CronJobs read credentials from the Secret `s3-credentials`.
+      "spark.hadoop.fs.s3a.endpoint": "http://minio.minio.svc.cluster.local:9000"
+      "spark.hadoop.fs.s3a.path.style.access": "true"
+      "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"
+      # WARNING: Disables Delta retention safety checks. Use with care.
+      "spark.databricks.delta.retentionDurationCheck.enabled": "false"
+
+  # Default Delta Lake table path (can be overridden per job)
+  # NOTE: Currently not referenced by templates; commands below are executed as-is.
+  defaultTablePath: "s3a://warehouse/delta"
+
+  # Scheduled maintenance jobs
+  jobs:
+    # VACUUM - Remove old files not referenced by the transaction log
+    vacuum:
+      enabled: true
+      schedule: "0 2 * * *"  # Daily at 2 AM
+      retentionHours: 168    # 7 days (168 hours)
+      # Tables list is informational for now; templates do not iterate over it.
+      # If you need per-table execution, split into multiple jobs or template the command.
+      tables:
+        - path: "s3a://warehouse/delta/default"
+          name: "all_tables"
+      command: |
+        # NOTE: This command is executed verbatim by the CronJob.
+        # Required Secret: `s3-credentials` with keys `access-key` and `secret-key`.
+        spark-sql --packages io.delta:delta-spark_2.13:4.0.0,org.apache.hadoop:hadoop-aws:3.3.4 \
+          --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+          --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+          --conf spark.hadoop.fs.s3a.endpoint=http://minio.minio.svc.cluster.local:9000 \
+          --conf spark.hadoop.fs.s3a.path.style.access=true \
+          --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+          --conf spark.hadoop.fs.s3a.access.key=$S3_ACCESS_KEY \
+          --conf spark.hadoop.fs.s3a.secret.key=$S3_SECRET_KEY \
+          --conf spark.databricks.delta.retentionDurationCheck.enabled=false \
+          -e "VACUUM delta.\`s3a://warehouse/delta/default\` RETAIN 168 HOURS;"
+
+    # OPTIMIZE - Compact small files into larger ones
+    optimize:
+      enabled: true
+      schedule: "0 3 * * 0"  # Weekly on Sunday at 3 AM
+      # Tables list is informational for now; templates do not iterate over it.
+      tables:
+        - path: "s3a://warehouse/delta/default"
+          name: "all_tables"
+          zOrderBy: []  # Optional Z-ORDER columns
+      command: |
+        # NOTE: This command is executed verbatim by the CronJob.
+        spark-sql --packages io.delta:delta-spark_2.13:4.0.0,org.apache.hadoop:hadoop-aws:3.3.4 \
+          --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+          --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+          --conf spark.hadoop.fs.s3a.endpoint=http://minio.minio.svc.cluster.local:9000 \
+          --conf spark.hadoop.fs.s3a.path.style.access=true \
+          --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+          --conf spark.hadoop.fs.s3a.access.key=$S3_ACCESS_KEY \
+          --conf spark.hadoop.fs.s3a.secret.key=$S3_SECRET_KEY \
+          -e "OPTIMIZE delta.\`s3a://warehouse/delta/default\`;"
+
+    # OPTIMIZE with Z-ORDER - Optimize with data skipping
+    optimizeZOrder:
+      enabled: false  # Disabled by default as it's resource intensive
+      schedule: "0 1 * * 6"  # Weekly on Saturday at 1 AM
+      # Tables list is informational for now; templates do not iterate over it.
+      tables:
+        - path: "s3a://warehouse/delta/your_table"
+          name: "your_table"
+          zOrderBy: ["column1", "column2"]
+      command: |
+        # NOTE: This command is executed verbatim by the CronJob.
+        spark-sql --packages io.delta:delta-spark_2.13:4.0.0,org.apache.hadoop:hadoop-aws:3.3.4 \
+          --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+          --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+          --conf spark.hadoop.fs.s3a.endpoint=http://minio.minio.svc.cluster.local:9000 \
+          --conf spark.hadoop.fs.s3a.path.style.access=true \
+          --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+          --conf spark.hadoop.fs.s3a.access.key=$S3_ACCESS_KEY \
+          --conf spark.hadoop.fs.s3a.secret.key=$S3_SECRET_KEY \
+          -e "OPTIMIZE delta.\`s3a://warehouse/delta/your_table\` ZORDER BY (column1, column2);"
+
+    # DESCRIBE HISTORY - Log table history for auditing
+    describeHistory:
+      enabled: false
+      schedule: "0 6 * * *"  # Daily at 6 AM
+      # Tables list is informational for now; templates do not iterate over it.
+      tables:
+        - path: "s3a://warehouse/delta/default"
+          name: "all_tables"
+      command: |
+        # NOTE: This command is executed verbatim by the CronJob.
+        spark-sql --packages io.delta:delta-spark_2.13:4.0.0,org.apache.hadoop:hadoop-aws:3.3.4 \
+          --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+          --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+          --conf spark.hadoop.fs.s3a.endpoint=http://minio.minio.svc.cluster.local:9000 \
+          --conf spark.hadoop.fs.s3a.path.style.access=true \
+          --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+          --conf spark.hadoop.fs.s3a.access.key=$S3_ACCESS_KEY \
+          --conf spark.hadoop.fs.s3a.secret.key=$S3_SECRET_KEY \
+          -e "DESCRIBE HISTORY delta.\`s3a://warehouse/delta/default\` LIMIT 100;"
+
+# Monitoring and alerting
+# NOTE: Monitoring values are currently not rendered by templates in this chart.
+monitoring:
+  enabled: true
+
+  # Prometheus metrics
+  prometheus:
+    enabled: true
+    port: 8080
+    path: "/metrics"
+
+  # Alerts configuration
+  alerts:
+    enabled: true
+    # Alert when maintenance jobs fail
+    jobFailures: true
+    # Alert when table size grows beyond threshold
+    tableSizeThreshold: "100GB"
+
+# Service account configuration
+serviceAccount:
+  create: true
+  name: "deltalake-maintenance"
+  annotations: {}
+
+# RBAC configuration
+rbac:
+  create: true
+  rules:
+    - apiGroups: [""]
+      resources: ["pods", "configmaps", "secrets"]
+      verbs: ["get", "list", "create", "update", "patch", "delete"]
+    - apiGroups: ["batch"]
+      resources: ["jobs", "cronjobs"]
+      verbs: ["get", "list", "create", "update", "patch", "delete"]
+
+# Network policies
+# NOTE: NetworkPolicy values are currently not rendered by templates in this chart.
+networkPolicy:
+  enabled: false
+  ingress: []
+  egress: []
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Security context
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+  capabilities:
+    drop:
+      - ALL
+
+# Cluster label for selector compatibility with kustomize post-renderer
+clusterLabel: "tdp"
+
+# =============================================================================
+# TEST MODE - Simple test without external dependencies (MinIO, etc.)
+# =============================================================================
+# Use this to validate Delta Lake features like time travel, VACUUM, OPTIMIZE
+# Run: helm install tdp-deltalake-test stack/charts/tdp/tdp-deltalake \
+#        --set test.enabled=true --set maintenance.enabled=false -n tdp-project
+# =============================================================================
+test:
+  enabled: false
+  command: |
+    echo "=============================================="
+    echo "TDP Delta Lake Test - Spark 4.0.0 + Delta 4.0"
+    echo "=============================================="
+    
+    # Run spark-shell with Delta Lake
+    spark-shell --packages io.delta:delta-spark_2.13:4.0.0 \
+      --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+      --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+      --conf spark.databricks.delta.retentionDurationCheck.enabled=false \
+      -I /dev/stdin << 'SCALA_CODE'
+    
+    import io.delta.tables._
+    import org.apache.spark.sql.functions._
+    
+    val tablePath = "/tmp/delta-test-table"
+    
+    println("\n=== 1. CREATE TABLE ===")
+    val data = Seq(
+      (1, "Alice", 100),
+      (2, "Bob", 200),
+      (3, "Carol", 300)
+    ).toDF("id", "name", "value")
+    
+    data.write.format("delta").mode("overwrite").save(tablePath)
+    println("Table created with 3 rows")
+    spark.read.format("delta").load(tablePath).show()
+    
+    println("\n=== 2. UPDATE (creates new version) ===")
+    val deltaTable = DeltaTable.forPath(spark, tablePath)
+    deltaTable.update(
+      condition = col("id") === 1,
+      set = Map("value" -> lit(150))
+    )
+    println("Updated Alice's value to 150")
+    spark.read.format("delta").load(tablePath).show()
+    
+    println("\n=== 3. INSERT (creates new version) ===")
+    val newData = Seq((4, "David", 400)).toDF("id", "name", "value")
+    newData.write.format("delta").mode("append").save(tablePath)
+    println("Inserted David")
+    spark.read.format("delta").load(tablePath).show()
+    
+    println("\n=== 4. DELETE (creates new version) ===")
+    deltaTable.delete(col("id") === 2)
+    println("Deleted Bob")
+    spark.read.format("delta").load(tablePath).show()
+    
+    println("\n=== 5. DESCRIBE HISTORY ===")
+    deltaTable.history().select("version", "timestamp", "operation", "operationParameters").show(false)
+    
+    println("\n=== 6. TIME TRAVEL - Read version 0 (original data) ===")
+    spark.read.format("delta").option("versionAsOf", 0).load(tablePath).show()
+    
+    println("\n=== 7. TIME TRAVEL - Read version 1 (after update) ===")
+    spark.read.format("delta").option("versionAsOf", 1).load(tablePath).show()
+    
+    println("\n=== 8. VACUUM (dry run) ===")
+    deltaTable.vacuum(0.0)
+    println("Vacuum completed")
+    
+    println("\n=== 9. OPTIMIZE ===")
+    deltaTable.optimize().executeCompaction()
+    println("Optimize completed")
+    
+    println("\n=== 10. FINAL STATE ===")
+    spark.read.format("delta").load(tablePath).show()
+    deltaTable.history().select("version", "timestamp", "operation").show(false)
+    
+    println("\n============================================")
+    println("SUCCESS! All Delta Lake features validated:")
+    println("- CREATE TABLE")
+    println("- UPDATE")
+    println("- INSERT")
+    println("- DELETE")
+    println("- DESCRIBE HISTORY")
+    println("- TIME TRAVEL (versionAsOf)")
+    println("- VACUUM")
+    println("- OPTIMIZE")
+    println("============================================")
+    
+    System.exit(0)
+    SCALA_CODE

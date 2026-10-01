@@ -1,0 +1,661 @@
+# ==============================================================================
+# TDP (Tecnisys Data Platform) - Tecnisys
+# Helm chart values for JupyterHub with Spark Integration
+#
+# Usage:
+# - Edit this file to configure the chart.
+# - Prefer placeholders over real secrets; provide secrets via Kubernetes Secret
+#   or via Helm --set / external tooling.
+# - Keep a single source of truth: values.yaml.
+# - Environment-specific configurations: use values-{env}.yaml files.
+# ==============================================================================
+
+# OpenShift-specific configuration
+# Auto-detection is enabled by default; set to true only to force OpenShift mode
+openshift:
+  enabled: false
+
+tdp-jupyter:
+  # Enable/disable JupyterHub deployment
+  enabled: true
+  # fullnameOverride is intentionally null so resource names follow the Helm release name.
+  # Example: helm upgrade --install tdp-jupyterhublab3 ... → pods named tdp-jupyterhublab3-hub-xxx
+  fullnameOverride:
+
+  # tdp-license-operator enforcement (tecnisys.com/licensed, tecnisys.com/product
+  # — see stack/manifests/platform/tdp-platform-license.yaml, the shared
+  # whole-platform policy also used by tdp-trino/tdp-argo/tdp-clickhouse/
+  # tdp-hive-metastore/tdp-ranger): commonLabels below is merged into
+  # jupyterhub.commonLabels (stack/charts/upstream/jupyter/jupyterhub/templates/
+  # _helpers.tpl) and reaches hub, proxy, scheduling.userScheduler, and
+  # scheduling.userPlaceholder's own metadata.labels — license expiry scales
+  # the hub/proxy/scheduler Deployments and preserves the placeholder
+  # StatefulSet, per the whole-platform policy's per-kind behavior.
+  # Per-user notebook servers can never be covered — KubeSpawner creates them
+  # as ephemeral Pods outside this Helm release. Remove the two tecnisys.com/*
+  # keys below to opt this chart out of enforcement.
+  commonLabels:
+    tecnisys.com/licensed: "true"
+    tecnisys.com/product: tdp-jupyter
+
+  # Private registry credentials
+  imagePullSecrets:
+    - name: tdp-registry
+
+  # Debug mode configuration
+  debug:
+    enabled: false
+
+  # ===========================================================================
+  # LDAP Authentication (Optional)
+  # ===========================================================================
+  # To enable LDAP authentication:
+  # 1. Create the required Secret:
+  #    kubectl create secret generic tdp-jupyter-ldap-bind \
+  #      --from-literal=LDAP_BIND_PASSWORD='<password>' -n <namespace>
+  #
+  # 2. Deploy with LDAP overlay:
+  #    helm upgrade --install tdp-jupyter stack/charts/tdp/tdp-jupyter \
+  #      -n tdp-project \
+  #      -f stack/charts/tdp/tdp-jupyter/values.yaml \
+  #      -f stack/charts/tdp/tdp-jupyter/values-tdp-ldap.yaml
+  #
+  # The values-tdp-ldap.yaml file contains all LDAP-specific configuration.
+  # ===========================================================================
+
+  # JupyterHub configuration
+  hub:
+    labels:
+      tecnisys.io/cluster: tdp
+
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: null
+      seccompProfile:
+        type: RuntimeDefault
+
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+      capabilities:
+        drop:
+          - ALL
+    
+    extraEnv: {}
+    
+    # Resource configuration - adjust based on your environment needs
+    # Standard: 100m-200m CPU, 256Mi-512Mi memory
+    # High-performance: 500m-1000m CPU, 1Gi-2Gi memory
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+    
+    # JupyterHub authentication and configuration
+    config:
+      JupyterHub:
+        authenticator_class: dummy
+      DummyAuthenticator:
+        username: admin
+        password: tdp-password  # Change for production!
+      KubeSpawner:
+        # Default image with Spark pre-installed
+        image_spec: "registry.tecnisys.com.br/tdp/images/jupyter/jupyter:4.5.6-2"
+      Spawner:
+        debug: false  # Enable for debugging
+        http_timeout: 30 # Increase timeout from default 30s to 60s for notebook startup
+
+    extraConfig:
+      # Dynamic naming: pod names and spark configmap follow the Helm release name
+      dynamic-naming: |
+        import os
+        release = os.environ.get("HELM_RELEASE_NAME", "jupyterhub")
+        c.KubeSpawner.pod_name_template = f"{release}-notebook-" + "{username}"
+        # Update spark-conf volume to reference the release-named configmap
+        for vol in c.KubeSpawner.volumes:
+            if vol.get("name") == "spark-conf" and "configMap" in vol:
+                vol["configMap"]["name"] = f"{release}-spark-integration"
+
+      openshift-auto-config: |
+        import json
+        import os
+        import ssl
+        from urllib.request import Request, urlopen
+        from tornado.log import app_log
+
+        def _detect_openshift():
+            if get_config("openshift.enabled", False):
+                app_log.info("OpenShift auto-config forced through openshift.enabled=true")
+                return True
+
+            token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+            ca_path = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+            if not (os.path.exists(token_path) and os.path.exists(ca_path)):
+                return False
+
+            try:
+                with open(token_path, "r", encoding="utf-8") as token_file:
+                    token = token_file.read().strip()
+
+                req = Request("https://kubernetes.default.svc/apis")
+                req.add_header("Authorization", f"Bearer {token}")
+                ctx = ssl.create_default_context(cafile=ca_path)
+                with urlopen(req, timeout=2, context=ctx) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+
+                groups = [group.get("name") for group in payload.get("groups", [])]
+                return any(name in ("route.openshift.io", "security.openshift.io") for name in groups)
+            except Exception as exc:  # pragma: no cover - best effort detection
+                app_log.warning("OpenShift auto-detection failed: %s", exc)
+                return False
+
+        IS_OPENSHIFT = _detect_openshift()
+
+        if IS_OPENSHIFT:
+            app_log.info("OpenShift detected - enabling singleuser compatibility patches")
+
+            def _ensure_entry(collection, name, data):
+                if any(item.get("name") == name for item in collection or []):
+                    return collection
+                new_collection = list(collection or [])
+                new_collection.append(data)
+                return new_collection
+
+            c.KubeSpawner.volumes = _ensure_entry(
+                c.KubeSpawner.volumes,
+                "etc-passwd",
+                {"name": "etc-passwd", "emptyDir": {}},
+            )
+            c.KubeSpawner.volumes = _ensure_entry(
+                c.KubeSpawner.volumes,
+                "etc-group",
+                {"name": "etc-group", "emptyDir": {}},
+            )
+
+            c.KubeSpawner.volume_mounts = _ensure_entry(
+                c.KubeSpawner.volume_mounts,
+                "etc-passwd",
+                {"name": "etc-passwd", "mountPath": "/etc/passwd", "subPath": "passwd"},
+            )
+            c.KubeSpawner.volume_mounts = _ensure_entry(
+                c.KubeSpawner.volume_mounts,
+                "etc-group",
+                {"name": "etc-group", "mountPath": "/etc/group", "subPath": "group"},
+            )
+
+            if not any(ic.get("name") == "openshift-passwd-bootstrap" for ic in c.KubeSpawner.init_containers or []):
+                init_containers = list(c.KubeSpawner.init_containers or [])
+                init_containers.append({
+                    "name": "openshift-passwd-bootstrap",
+                    "image": "busybox:1.36",
+                    "command": [
+                        "/bin/sh",
+                        "-c",
+                        "cat <<'SCRIPT' | /bin/sh\n"
+                        "set -euo pipefail\n"
+                        "PASSWD_DST=/etc-passwd/passwd\n"
+                        "GROUP_DST=/etc-group/group\n"
+                        "cp /etc/passwd $${{PASSWD_DST}}\n"
+                        "cp /etc/group $${{GROUP_DST}}\n"
+                        "chmod 0666 $${{PASSWD_DST}} $${{GROUP_DST}}\n"
+                        "UID=$(id -u)\n"
+                        "GID=$(id -g)\n"
+                        "tmp=$(mktemp); grep -Ev \"^(jovyan:|$${{UID}}:)\" $${{PASSWD_DST}} > $${{tmp}} && mv $${{tmp}} $${{PASSWD_DST}}\n"
+                        "echo \"jovyan:x:$${{UID}}:$${{GID}}::/home/jovyan:/bin/bash\" >> $${{PASSWD_DST}}\n"
+                        "tmp=$(mktemp); grep -Ev \"^(jovyan:|$${{GID}}:|group$${{GID}}:)\" $${{GROUP_DST}} > $${{tmp}} && mv $${{tmp}} $${{GROUP_DST}}\n"
+                        "echo \"jovyan:x:$${{GID}}:\" >> $${{GROUP_DST}}\n"
+                        "for gid in $$(id -G); do\n"
+                        "  if ! grep -q \"[:x:]$${{gid}}:\" $${{GROUP_DST}}; then\n"
+                        "    echo \"group$${{gid}}:x:$${{gid}}:\" >> $${{GROUP_DST}}\n"
+                        "  fi\n"
+                        "done\n"
+                        "SCRIPT",
+                    ],
+                    "volumeMounts": [
+                        {"name": "etc-passwd", "mountPath": "/etc-passwd"},
+                        {"name": "etc-group", "mountPath": "/etc-group"},
+                    ],
+                })
+                c.KubeSpawner.init_containers = init_containers
+
+            environment = dict(c.KubeSpawner.environment or {})
+            environment["TDP_OPENSHIFT_CLUSTER"] = "true"
+            c.KubeSpawner.environment = environment
+
+        else:
+            app_log.info("OpenShift not detected - using vanilla Kubernetes configuration")
+    
+    # Database configuration
+    # Default: sqlite-pvc (internal database)
+    # For external PostgreSQL, uncomment and configure below:
+    # db:
+    #   type: postgres
+    #   url: "postgresql://jupyter@tdp-postgresql-project.tdp-project.svc.cluster.local:5432/jupyterhub_db"
+    #   password: null
+    #   upgrade: false
+    # extraEnv:
+    #   PGPASSWORD:
+    #     valueFrom:
+    #       secretKeyRef:
+    #         name: "tdp-jupyter-jupyter-database"
+    #         key: password
+
+  # Proxy configuration for external access
+  proxy:
+    labels:
+      tecnisys.io/cluster: tdp
+
+    chp:
+      containerSecurityContext:
+        runAsNonRoot: true
+        runAsUser: null
+        runAsGroup: null
+        allowPrivilegeEscalation: false
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop:
+            - ALL
+
+    traefik:
+      containerSecurityContext:
+        runAsNonRoot: true
+        runAsUser: null
+        runAsGroup: null
+        allowPrivilegeEscalation: false
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop:
+            - ALL
+
+    secretSync:
+      containerSecurityContext:
+        runAsNonRoot: true
+        runAsUser: null
+        runAsGroup: null
+        allowPrivilegeEscalation: false
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop:
+            - ALL
+    
+    # Service type configuration
+    # NodePort for external access, ClusterIP for internal only
+    service:
+      type: NodePort
+      nodePorts:
+        http: 30080
+        https: 30443
+      labels:
+        tecnisys.io/cluster: tdp
+
+  # Single-user server configuration
+  singleuser:
+    extraLabels:
+      tecnisys.io/cluster: tdp
+    uid: null
+    fsGid: null
+    allowPrivilegeEscalation: false
+    
+    # Container image configuration
+    image:
+      name: registry.tecnisys.com.br/tdp/images/jupyter
+      tag: 4.5.6-2
+      pullPolicy: IfNotPresent  # Use Always for updates
+    # Cloud metadata security
+    cloudMetadata:
+      blockWithIptables: false
+
+    extraFiles:
+      kernel-filter:
+        mountPath: /etc/jupyter/jupyter_server_config.d/tdp_kernel_filter.py
+        stringData: |
+          c.KernelSpecManager.allowed_kernelspecs = {"py312"}
+
+    # Resource configuration - adjust based on your environment needs
+    # High-performance defaults: 4 CPU limit, 8G memory limit
+    # Standard: consider 0.5 CPU limit, 1G memory limit
+    cpu:
+      limit: 4
+      guarantee: 2
+    memory:
+      limit: 8G
+      guarantee: 4G
+    
+    # Storage configuration
+    storage:
+      dynamic:
+        storageClass: null  # null to use cluster default storage class dynamically
+      capacity: 5Gi  # Adjust: 5Gi for high-performance, 1Gi for standard
+      extraLabels:
+        tecnisys.io/cluster: tdp
+
+      # Spark integration volumes
+      extraVolumes:
+        - name: spark-conf
+          configMap:
+            name: tdp-jupyter-spark-integration
+            defaultMode: 0755
+        - name: spark-local
+          emptyDir: {}
+        - name: spark-logs
+          emptyDir: {}
+      extraVolumeMounts:
+        - name: spark-conf
+          mountPath: /opt/bitnami/spark/conf
+        - name: spark-local
+          mountPath: /tmp/spark-local
+        - name: spark-logs
+          mountPath: /tmp/spark-logs
+
+    # Lifecycle hooks for Spark initialization
+    lifecycleHooks:
+      postStart:
+        exec:
+          command:
+            - "/bin/bash"
+            - "-c"
+            - |
+              # Source Spark environment if available
+              if [ -f /opt/bitnami/spark/conf/jupyter-spark-env.sh ]; then
+                source /opt/bitnami/spark/conf/jupyter-spark-env.sh
+              fi
+              # Run startup script if available
+              if [ -f /opt/bitnami/spark/conf/00-spark-setup.sh ]; then
+                /opt/bitnami/spark/conf/00-spark-setup.sh
+              fi
+
+              # Make Python 3.12 the default kernel by overriding the user-level "python3" kernelspec
+              if [ -d "/usr/local/share/jupyter/kernels/py312" ]; then
+                mkdir -p "${HOME}/.local/share/jupyter/kernels"
+                rm -rf "${HOME}/.local/share/jupyter/kernels/python3"
+                cp -a "/usr/local/share/jupyter/kernels/py312" "${HOME}/.local/share/jupyter/kernels/python3"
+                if [ -w "/usr/local/share/jupyter/kernels" ]; then
+                  rm -rf "/usr/local/share/jupyter/kernels/py312" || true
+                fi
+              fi
+
+              mkdir -p "${HOME}/.jupyter"
+              cat > "${HOME}/.jupyter/jupyter_server_config.py" << 'EOF'
+              c = get_config()
+              c.KernelSpecManager.allowed_kernelspecs = {"py312"}
+              EOF
+              cat > "${HOME}/.jupyter/jupyter_notebook_config.py" << 'EOF'
+              c = get_config()
+              c.KernelSpecManager.allowed_kernelspecs = {"py312"}
+              EOF
+
+              if [ "${TDP_OPENSHIFT_CLUSTER:-false}" = "true" ]; then
+                exit 0
+              fi
+
+    # Spark environment variables
+    extraEnv:
+      # Core Spark environment variables
+      SPARK_HOME: "/opt/bitnami/spark"
+      PYTHONPATH: ""
+      SPARK_CONF_DIR: "/opt/bitnami/spark/conf"
+      PYSPARK_PYTHON: "/opt/conda/envs/py312/bin/python"
+      PYSPARK_DRIVER_PYTHON: "/opt/conda/envs/py312/bin/python"
+      
+      # Spark resource configuration - adjust based on your environment
+      SPARK_DRIVER_MEMORY: "4g"  # Reduce to 2g for standard environments
+      SPARK_EXECUTOR_MEMORY: "4g"  # Reduce to 2g for standard environments
+      
+      # Spark cluster configuration (empty for local mode)
+      SPARK_MASTER_URL: "local[*]"  # Set to spark://master:7077 for cluster mode
+      SPARK_DRIVER_BIND_ADDRESS: "0.0.0.0"
+      SPARK_DRIVER_PORT: "2222"
+      SPARK_BLOCKMANAGER_PORT: "7777"
+
+    # Network policies for JupyterHub
+    networkPolicy:
+      # Ensures that the default network policy for the user is active
+      enabled: true
+      # Adds egress rules to the default network policy
+      egress:
+        # Allow DNS resolution
+        - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: kube-system
+          ports:
+          - protocol: UDP
+            port: 53
+          - protocol: TCP
+            port: 53
+        # Allow access to local namespace (for hub communication)
+        - to:
+          - namespaceSelector: {}
+        # Allow access to external IPs (outside cluster) for S3 and other external services
+        - to:
+          - ipBlock:
+              cidr: 0.0.0.0/0
+        # Allows connection to Spark Master (generic: matches any Spark master in the namespace)
+        - to:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/component: master
+                app.kubernetes.io/name: spark
+          ports:
+          - protocol: TCP
+            port: 7077
+        # Rule to allow connection to Minio
+        - to:
+          - namespaceSelector:
+              matchLabels:
+                # Selects the 'storage' namespace
+                kubernetes.io/metadata.name: storage
+            podSelector:
+              matchLabels:
+                # Selects the Minio pods with the correct label
+                v1.min.io/tenant: tok-minio
+          ports:
+          - protocol: TCP
+            port: 443
+          - protocol: TCP
+            port: 9000
+        # Rule to allow connection to Trino
+        - to:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/component: coordinator
+                app.kubernetes.io/instance: tdp-trino
+                app.kubernetes.io/name: trino
+          ports:
+          - protocol: TCP
+            port: 8080
+        # Rule to allow connection to Hive Metastore
+        - to:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: hive-metastore
+          ports:
+          - protocol: TCP
+            port: 9083
+        # Rule to allow connection to Kafka brokers
+        - to:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: kafka
+          ports:
+          - protocol: TCP
+            port: 9092
+          - protocol: TCP
+            port: 9093
+        # Rule to allow connection to Ozone S3 Gateway
+        - to:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: ozone
+                app.kubernetes.io/component: s3g
+          ports:
+          - protocol: TCP
+            port: 9878
+
+  # PrePuller configuration for image optimization
+  # Disabled to avoid RBAC permission issues with hook-image-awaiter in OpenShift
+  prePuller:
+    continuous:
+      enabled: false
+    hook:
+      enabled: false
+      containerSecurityContext:
+        runAsNonRoot: true
+        runAsUser: null
+        runAsGroup: null
+        allowPrivilegeEscalation: false
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop:
+            - ALL
+    labels:
+      tecnisys.io/cluster: tdp
+    pause:
+      containerSecurityContext:
+        runAsNonRoot: true
+        runAsUser: null
+        runAsGroup: null
+        allowPrivilegeEscalation: false
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop:
+            - ALL
+
+  # Scheduling configuration
+  scheduling:
+    userScheduler:
+      enabled: true
+      labels:
+        tecnisys.io/cluster: tdp
+      containerSecurityContext:
+        runAsNonRoot: false
+        runAsUser: null
+        runAsGroup: null
+        allowPrivilegeEscalation: false
+        seccompProfile:
+          type: RuntimeDefault
+    userPlaceholder:
+      enabled: true
+      labels:
+        tecnisys.io/cluster: tdp
+      containerSecurityContext:
+        runAsNonRoot: true
+        runAsUser: null
+        runAsGroup: null
+        allowPrivilegeEscalation: false
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop:
+            - ALL
+
+# Spark integration configuration
+# Notebooks integrate with an existing/external Spark cluster (the tdp-spark
+# subchart is no longer bundled as a dependency of this chart).
+tdpSparkIntegration:
+  enabled: false
+
+  # ConfigMap for Spark-JupyterHub integration
+  configMap:
+    # name: Leave empty to auto-derive from release name (e.g. <release>-spark-integration)
+    name: ""
+    sparkConfig:
+      # Kubernetes configuration
+      "spark.kubernetes.namespace": ""
+      "spark.master": ""  # Auto-resolved: local[*] when disabled, spark://<release>-spark-master-svc.<ns>:7077 when enabled
+      "spark.driver.host": ""
+      "spark.driver.port": "2222"
+      "spark.driver.bindAddress": "0.0.0.0"
+      "spark.blockManager.port": "7777"
+      "spark.driver.port.maxRetries": "0"
+      
+      # Application configuration
+      "spark.app.id": "jupyter-${JUPYTERHUB_USER}"
+      "spark.ui.enabled": "true"
+      "spark.ui.proxyBase": "/user/${JUPYTERHUB_USER}/proxy/4040"
+      
+      # Resource configuration 
+      "spark.executor.instances": "3"  
+      "spark.executor.memory": "2g"  
+      "spark.executor.cores": "2"  
+      "spark.python.worker.memory": "1g"
+
+# Global configuration
+global:
+  # Security context
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  
+  # Image configuration
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets: []
+
+# TDP platform configurations
+TDP-Settings:
+  externalDatabase:
+    enabled: false  # Set to true when using external PostgreSQL
+    recreate: false
+    # Uncomment when using external PostgreSQL
+    # externalSecret:
+    #   releaseName: "tdp-postgresql-project"
+  
+# Gateway configuration controls which network exposure method is used
+  gateway:
+    # Enable Kubernetes Ingress resources for JupyterHub
+    # When true, Ingress resources will be created based on the 'ingress' section above
+    ingress:
+      enabled: false
+    # Enable Kubernetes Gateway API resources for JupyterHub
+    # When true, HTTPRoute resources will be created based on the 'gatewayApi' section above
+    # Note: Gateway API and Ingress are mutually exclusive - only one should be enabled
+    gatewayApi:
+      enabled: false
+# Gateway API configuration for exposing JupyterHub UI
+# Used when TDP-Settings.gateway.gatewayApi.enabled is true
+gatewayApi:
+  # Gateway reference - the Gateway resource to attach HTTPRoutes to
+  gatewayClassName: ""
+  parentRefs: []
+  jupyter:
+    enabled: true
+    hostnames:
+      - jupyter.${TDP_DOMAIN}
+    rules:
+      - matches:
+          - path:
+              type: PathPrefix
+              value: /
+        backendRefs:
+          - name: ""
+            port: 80
+    tls:
+      certificateRefs: []
+
+# Ingress configuration for exposing JupyterHub UI
+# Used when TDP-Settings.gateway.ingress.enabled is true
+ingress:
+  ingressClassName: "nginx"
+  annotations: {}
+  hosts:
+    - host: jupyter.${TDP_DOMAIN}
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+

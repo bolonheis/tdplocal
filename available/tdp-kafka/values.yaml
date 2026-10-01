@@ -1,0 +1,521 @@
+# ==============================================================================
+# TDP (Tecnisys Data Platform) - Tecnisys
+# Helm chart values for Apache Kafka with Strimzi Operator and Kafka UI
+#
+# Usage:
+# - Edit this file to configure the chart.
+# - Prefer placeholders over real secrets; provide secrets via Kubernetes Secret
+#   or via Helm --set / external tooling.
+# - Keep a single source of truth: values.yaml.
+# - Environment-specific configurations: use values-{env}.yaml files.
+#
+# Debezium Connectors Usage:
+# - Enable connectors by setting kafkaConnects.{type}.enabled: true
+# - Configure database connection parameters in connectors.{name} section
+# - Set createSecret: true to auto-generate database credentials secret
+# - Or createSecret: false and provide existing secret name
+# - Each connector creates topics with the specified topicPrefix
+#
+# Licensing (tdp-license-operator) — see
+# stack/manifests/platform/tdp-platform-license.yaml (one shared whole-platform
+# policy). IMPORTANT, read before assuming this chart is fully protected: the
+# operator only enforces against a Deployment/StatefulSet/CronJob that carries
+# tecnisys.com/licensed=true and tecnisys.com/product on ITS OWN metadata.labels
+# (not pod labels, and not a custom resource's labels). Of everything this
+# chart renders:
+#   - kafka-ui's Deployment (kafka-ui.labels below): reachable, labeled, and
+#     the only piece where license expiry has a real, visible effect (removes
+#     the admin/monitoring UI — clients never go through kafka-ui anyway).
+#   - The Strimzi cluster-operator's Deployment (strimzi-kafka-operator.
+#     commonLabels below): reachable via a small patch to the vendored chart
+#     (stack/charts/upstream/kafka/strimzi-operator/templates/060-Deployment-
+#     strimzi-cluster-operator.yaml — see that chart's DEVNOTES.md for the
+#     patch). Labeled for visibility/consistency, NOT real enforcement: the
+#     operator being scaled to zero does not stop already-running Kafka
+#     brokers from serving traffic.
+#   - Debezium KafkaConnect (opt-in, kafkaConnects.*.enabled, off by default)
+#     and the actual Kafka broker/controller nodes (KafkaNodePool "brokers")
+#     have no Deployment/StatefulSet at all: Strimzi 0.48.0 manages both via
+#     StrimziPodSet, a CRD tdp-license-operator does not watch
+#     (pkg/enforcement/enforcement.go only ever lists Deployments,
+#     StatefulSets and CronJobs). Verified live:
+#     `spec.template.deployment.metadata.labels` on a KafkaConnect CR is
+#     explicitly deprecated and ignored by this Strimzi version ("Kafka
+#     Connect and MirrorMaker 2 operands do not use Deployment resources
+#     anymore"). A template-only fix was tried and reverted for that reason
+#     (see git history on templates/kafka-connect.yaml).
+#     The brokers ARE, however, reachable at the *Pod* level: the license
+#     labels in extraLabels below land on each broker Pod's own
+#     metadata.labels (via Kafka/KafkaNodePool spec.template.pod), which is
+#     verified and is NOT deprecated. That is the interception point a
+#     Pod-scoped enforcement action can use. Enforcing on it still requires
+#     a change in tdp-license-operator (delete protected Pods + deny their
+#     re-creation at admission); until that ships, the labels below are
+#     wiring/visibility only and license expiry does not stop the brokers.
+#     Full live evaluation of every candidate mechanism — including why
+#     NetworkPolicy and Service-selector tricks cannot work here, and why
+#     scaling KafkaNodePool.spec.replicas must never be used — is in
+#     tests/license/KAFKA_ALTERNATIVE_ENFORCEMENT_TEST_REPORT.md.
+# Remove the tecnisys.com/* keys below (or kafka-ui.labels') to opt the
+# respective piece out of enforcement.
+# ==============================================================================
+
+# Disabled by default: the Strimzi Operator is now a single, cluster-wide
+# shared instance installed once via `tdp-operator`
+# (stack/charts/tdp/tdp-operator) — see that chart's README for why.
+# Bundling one operator copy per tdp-kafka release (one per namespace/
+# cluster, the normal TDP layout) meant N cluster-wide-RBAC,
+# watch-all-namespaces operators (this chart's own upstream default:
+# watchNamespaces: [], watchAnyNamespace: true) ran concurrently and fought
+# over the same Kafka/KafkaTopic/KafkaUser CRs — an operator started in
+# namespace A could mutate a cluster that actually belonged to namespace B.
+# Only flip this to true for a standalone install with no `tdp-operator`
+# anywhere else in the cluster.
+strimzi-kafka-operator:
+  enabled: false
+  # Only takes effect when enabled above. Lands on the Strimzi
+  # cluster-operator Deployment's own metadata.labels (verified via
+  # `helm template`) via a patch to the vendored chart — see the licensing
+  # note near the top of this file.
+  commonLabels:
+    tecnisys.com/licensed: "true"
+    tecnisys.com/product: tdp-kafka
+
+name: tdp-kafka
+kafkaVersion: 4.1.0
+metadataVersion: 4.1-IV1
+clusterLabel: "tdp"
+
+listeners:
+  plain:
+    enabled: true      # plain listener
+    port: 9092
+  tls:
+    enabled: true      # TLS listener
+    port: 9093
+
+security:
+  enabled: false
+  listener: plain
+  authentication:
+    enabled: false
+    type: scram-sha-512
+  authorization:
+    provider: none # none | simple | ranger
+    superUsers: []
+    ranger:
+      serviceName: tdp-kafka
+      authorizerClass: org.apache.ranger.authorization.kafka.authorizer.RangerKafkaAuthorizer
+      supportsAdminApi: false
+      rangerAdminUrl: http://tdp-ranger-ranger:6080
+      accessClusterName: tdp-kafka.tdp-project
+      policySourceImpl: org.apache.ranger.admin.client.RangerAdminRESTClient
+      pollIntervalMs: 30000
+      restClientConnectionTimeoutMs: 120000
+      restClientReadTimeoutMs: 30000
+      disableCacheIfServiceNotFound: false
+      # Ranger Kafka authorization has not been explicitly validated for
+      # Strimzi 0.48.0 + Kafka 4.1.0 in KRaft combined (controller+broker)
+      # mode. Only set this to true after explicit validation in that
+      # topology (see stack/images/kafka/ranger-plugin/README.md).
+      allowUnsupportedKRaftCombined: false
+      plugin:
+        image:
+          repository: registry.tecnisys.com.br/tdp/images/kafka
+          tag: 0.48.0-kafka-4.1.0-ranger
+          pullPolicy: IfNotPresent
+        imagePullSecrets: []
+        config:
+          createConfigMap: true
+          existingConfigMap: ""
+          existingSecret: ""
+        # Disabled by default: the log4j audit destination class
+        # (org.apache.ranger.audit.destination.Log4JAuditDestination) is not
+        # present in the jar set fetched from Maven Central for this plugin
+        # version (ClassNotFoundException at broker startup if enabled).
+        # Revisit if/when audit logging is needed — likely requires sourcing
+        # the jars from a full Ranger admin/agent build instead of Maven
+        # Central's individually-published artifacts.
+        audit:
+          enabled: false
+          destination:
+            stdout: false
+            solr: false
+            hdfs: false
+        cache:
+          mountPath: /mnt/ranger-kafka-plugin/cache
+        spool:
+          mountPath: /mnt/ranger-kafka-plugin/audit/spool
+  users: []
+
+config:
+  offsets.topic.replication.factor: 3
+  transaction.state.log.replication.factor: 3
+  transaction.state.log.min.isr: 2
+  default.replication.factor: 3
+  min.insync.replicas: 2
+
+entityOperator:
+  enabled: true
+
+nodePool:
+  name: brokers
+  replicas: 4
+  roles: ["controller","broker"]
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: 10Gi
+        # false: removing a node (scale-down, or a KafkaNodePool.spec.replicas
+        # change) must never delete its PVC. With true, Strimzi deletes the
+        # volume of every removed node — turning any scale-down, including one
+        # applied by automation, into irreversible data loss.
+        deleteClaim: false
+        kraftMetadata: shared
+        storageClass: null  # null = use the cluster default StorageClass (recommended)
+
+  # Scheduling for the broker/controller pods, rendered into
+  # KafkaNodePool.spec.template.pod (which takes precedence over the Kafka
+  # CR's pod template). Rendered with tpl, so values may reference
+  # {{ .Values.name }}. Strimzi's pod template has no nodeSelector: use
+  # nodeAffinity in `affinity` to pin brokers to dedicated nodes.
+  #
+  # Default: spread brokers evenly across nodes (at most 1 of difference
+  # between any two nodes, e.g. 4 brokers on 3 nodes -> 2/1/1). Kafka places
+  # partition replicas per broker, not per node, so without this several
+  # brokers - and every replica of a partition - can share one node.
+  # ScheduleAnyway never leaves a broker Pending on small clusters. The
+  # selector matches the same labels as Strimzi's own broker PDB. Set to []
+  # to disable. With node-local storage (e.g. local-path), existing brokers
+  # stay on the node that holds their volume: this only affects placement
+  # of new brokers/volumes.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          strimzi.io/cluster: "{{ .Values.name }}"
+          strimzi.io/kind: Kafka
+          strimzi.io/name: "{{ .Values.name }}-kafka"
+  affinity: {}
+  tolerations: []
+
+# Broker liveness/readiness probes, applied to spec.kafka of the Kafka CR.
+#
+# These are deliberately much more permissive than Strimzi's defaults
+# (initialDelaySeconds 15 / timeoutSeconds 5 / periodSeconds 10 /
+# failureThreshold 3). Those defaults are unsafe whenever every broker starts
+# at once — a full-cluster restart, a node-pool recreation, or a license
+# enforcement/restore cycle. Validated live: with the defaults, four
+# combined-role KRaft nodes recovering logs and forming a metadata quorum
+# concurrently exceed the 5s exec timeout of /opt/kafka/kafka_liveness.sh;
+# three misses (~30s) trigger SIGTERM, which prevents the quorum from ever
+# forming, and the cluster settles into CrashLoopBackOff instead of starting.
+# With the values below the same simultaneous restart converged in ~160s with
+# zero restarts. Do not tighten these without re-testing a cold start of the
+# whole cluster.
+probes:
+  liveness:
+    initialDelaySeconds: 60
+    timeoutSeconds: 30
+    periodSeconds: 30
+    failureThreshold: 10
+  readiness:
+    initialDelaySeconds: 60
+    timeoutSeconds: 30
+    periodSeconds: 30
+    failureThreshold: 10
+
+# Propagated by tdp-kafka.extraLabels to the Strimzi-generated resources whose
+# templates this chart controls — notably the broker Pods themselves (via
+# KafkaNodePool/Kafka spec.template.pod.metadata.labels), plus the podSet,
+# PVCs and Services.
+extraLabels:
+  tecnisys.io/cluster: tdp
+  # Reaches the broker Pods' own metadata.labels — verified live. This is what
+  # lets license enforcement target the brokers at the Pod level, which is the
+  # only interception point that works for a StrimziPodSet-managed workload.
+  # See the "Licensing" note at the top of this file.
+  tecnisys.com/licensed: "true"
+  tecnisys.com/product: tdp-kafka
+
+tdp-kafka:
+  enabled: true
+
+
+kafka-ui:
+  name: kafka-ui
+  enabled: true
+
+  # Lands on the kafka-ui Deployment's own metadata.labels (verified via
+  # `helm template`) — the license opt-in for this chart's one workload the
+  # operator can actually reach. See the licensing note near the top of
+  # this file for what is and isn't covered.
+  labels:
+    tecnisys.com/licensed: "true"
+    tecnisys.com/product: tdp-kafka
+
+  # kafka-ui's own config source is yamlApplicationConfigConfigMap below;
+  # yamlApplicationConfig must stay null so it doesn't also render (see the
+  # fix + comment on kafka-ui's own default in
+  # stack/charts/upstream/kafka/kafka-ui/values.yaml — its default used to
+  # be a live, non-empty example config, which meant this field was truthy
+  # no matter what a consumer chart set it to, so both this and the
+  # ConfigMap source rendered a volumeMount at the same /kafka-ui/
+  # mountPath and every install failed).
+  yamlApplicationConfig: null
+  yamlApplicationConfigConfigMap:
+    name: tdp-kafka-ui-config
+    keyName: config.yml
+
+  applicationConfig:
+    # =====================================================
+    # Authentication Configuration
+    # Options: disabled, LOGIN_FORM, LDAP
+    # =====================================================
+    auth:
+      type: LOGIN_FORM
+    # =====================================================
+    # Basic Authentication Configuration
+    # Used with LOGIN_FORM authentication type.
+    # =====================================================
+    spring:
+      security:
+        user:
+          name: admin
+          password: admin
+
+    # =====================================================
+    # LDAP / Active Directory Authentication
+    # Disabled by default (auth.type: LOGIN_FORM above).
+    # To enable it, see stack/charts/tdp/tdp-kafka/values-tdp-ldap.yaml
+    # =====================================================
+
+    management:
+      health:
+        ldap:
+          enabled: true
+
+  connection:
+    clusterName: TDP
+    # Empty by default: derives to "<name>-kafka-bootstrap:9092" (the Service
+    # Strimzi creates from the Kafka CR, whose metadata.name is .Values.name)
+    # — see templates/kafka-ui-configmap.yaml. Only fill this in to point at
+    # a bootstrap different from this release's own cluster (e.g. another
+    # existing Kafka namespace/cluster).
+    bootstrapServers: ""
+    properties: {}
+    authentication:
+      username: kafka-ui
+      passwordEnvVar: KAFKA_UI_SASL_PASSWORD
+      existingSecret:
+        name: ""
+        passwordKey: password
+
+  rbac:
+    enabled: false
+    defaultRole: {}
+    roles: []
+
+  service:
+    # Service labels
+    labels: { tecnisys.io/cluster: tdp }
+    # Service type
+    type: ClusterIP
+    # Service port
+    port: 80
+    # For service type LoadBalancer, specify reserved static IP
+    # loadBalancerIP: 10.11.12.13
+    # Specific nodePort. Requires service.type=NodePort
+    nodePort: 30081 # or leave empty for random port between 30000-32767
+
+registryPushSecret:
+  create: false
+  name: "my-registry-credentials"
+  dockerconfigjsonB64: ""
+
+# ==============================================================================
+# Debezium Connectors Configuration
+# 
+# Supported database types: postgres, mysql, sqlserver, oracle
+# Each connector type can have multiple named connector instances
+# 
+# To enable a connector:
+# 1. Set kafkaConnects.{type}.enabled: true
+# 2. Configure the connect section with image and build parameters
+# 3. Enable specific connectors in the connectors section
+# 4. Set database connection parameters
+# 5. Choose between auto-generated secret (createSecret: true) or existing secret
+#
+# connect.bootstrapServers left empty below derives to "<name>-kafka-bootstrap:9092"
+# (the Service the Strimzi Kafka CR in this same release exposes) — see
+# templates/kafka-connect.yaml. Only set it to point at a different cluster.
+# ==============================================================================
+
+kafkaConnects:
+  postgres:
+    enabled: false
+    connect:
+      name: connect-debezium-postgres
+      replicas: 1
+      bootstrapServers: ""
+      kafkaVersion: "4.1.0"
+      build:
+        image: "registry.tecnisys.com.br/community/images/dopaco/connect-debezium-postgres:4.1.0-debezium-2.5.0"
+        pushSecret: "my-registry-credentials"
+        pluginUrl: "https://repo1.maven.org/maven2/io/debezium/debezium-connector-postgres/2.5.0.Final/debezium-connector-postgres-2.5.0.Final-plugin.tar.gz"
+        pluginSha512: ""
+      config:
+        groupId: "connect-debezium-postgres"
+        replicationFactor: 3
+    connectors:
+      appdb:
+        enabled: false
+        name: debezium-postgres-appdb
+        topicPrefix: "pgapp"
+        schemaIncludeList: "public"
+        tableIncludeList: ""
+        slotName: "debezium_appdb"
+        postgres:
+          createSecret: false
+          secretName: "db-pg-appdb"
+          host: "tdp-postgresql-project.tdp-project.svc.cluster.local"
+          port: "5432"
+          dbname: "appdb"
+          user: "debezium"
+          password: "your-database-password"
+  mysql:
+    enabled: false
+    connect:
+      name: connect-debezium-mysql
+      replicas: 1
+      bootstrapServers: ""
+      kafkaVersion: "4.1.0"
+      build:
+        image: "registry.tecnisys.com.br/community/images/dopaco/connect-debezium-mysql:4.1.0-debezium-2.5.0"
+        pushSecret: "my-registry-credentials"
+        pluginUrl: "https://repo1.maven.org/maven2/io/debezium/debezium-connector-mysql/2.5.0.Final/debezium-connector-mysql-2.5.0.Final-plugin.tar.gz"
+        pluginSha512: ""
+      config:
+        groupId: "connect-debezium-mysql"
+        replicationFactor: 3
+    connectors:
+      appdb:
+        enabled: true
+        name: debezium-mysql-appdb
+        topicPrefix: "mysqlapp"
+        mysql:
+          createSecret: true
+          secretName: "db-mysql-appdb"
+          host: "mysql.tdp-project.svc.cluster.local"
+          port: "3306"
+          user: "debezium"
+          password: "your-database-password"
+          serverId: "184054"
+          databaseIncludeList: "appdb"
+  sqlserver:
+    enabled: false
+    connect:
+      name: connect-debezium-sqlserver
+      replicas: 1
+      bootstrapServers: ""
+      kafkaVersion: "4.1.0"
+      build:
+        image: "registry.tecnisys.com.br/community/images/dopaco/connect-debezium-sqlserver:4.1.0-debezium-2.5.0"
+        pushSecret: "my-registry-credentials"
+        pluginUrl: "https://repo1.maven.org/maven2/io/debezium/debezium-connector-sqlserver/2.5.0.Final/debezium-connector-sqlserver-2.5.0.Final-plugin.tar.gz"
+        pluginSha512: ""
+      config:
+        groupId: "connect-debezium-sqlserver"
+        replicationFactor: 3
+    connectors:
+      appdb:
+        enabled: true
+        name: debezium-sqlserver-appdb
+        topicPrefix: "mssqlapp"
+        sqlserver:
+          createSecret: true
+          secretName: "db-mssql-appdb"
+          host: "sqlserver.tdp-project.svc.cluster.local"
+          port: "1433"
+          user: "debezium"
+          password: "your-database-password"
+          databaseNames: "AppDb"
+          encrypt: "false"
+          trustServerCertificate: "true"
+  oracle:
+    enabled: false
+    connect:
+      name: connect-debezium-oracle
+      replicas: 1
+      bootstrapServers: ""
+      kafkaVersion: "4.1.0"
+      build:
+        image: "registry.tecnisys.com.br/community/images/dopaco/connect-debezium-oracle:4.1.0-debezium-2.5.0"
+        pushSecret: "my-registry-credentials"
+        pluginUrl: "https://repo1.maven.org/maven2/io/debezium/debezium-connector-oracle/2.5.0.Final/debezium-connector-oracle-2.5.0.Final-plugin.tar.gz"
+        pluginSha512: ""
+      config:
+        groupId: "connect-debezium-oracle"
+        replicationFactor: 3
+    connectors:
+      appdb:
+        enabled: true
+        name: debezium-oracle-appdb
+        topicPrefix: "oraapp"
+        oracle:
+          createSecret: true
+          secretName: "db-oracle-appdb"
+          host: "oracle.tdp-project.svc.cluster.local"
+          port: "1521"
+          user: "debezium"
+          password: "your-database-password"
+          dbname: "ORCLCDB"
+          pdbName: "ORCLPDB1"
+          logMiningStrategy: "online_catalog"
+# Gateway API configuration for exposing Kafka UI
+# Used when TDP-Settings.gateway.gatewayApi.enabled is true
+gatewayApi:
+  parentRefs: []
+  kafkaUi:
+    enabled: true
+    hostnames:
+      - kafka-ui.${TDP_DOMAIN}
+    rules:
+      - matches:
+          - path:
+              type: PathPrefix
+              value: /
+        backendRefs:
+          - name: ""
+            port: 80
+    tls:
+      certificateRefs: []
+
+# Ingress configuration for exposing Kafka UI
+# Used when TDP-Settings.gateway.ingress.enabled is true
+ingress:
+  ingressClassName: nginx
+  annotations: {}
+  hosts:
+    - host: kafka-ui.${TDP_DOMAIN}
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# TDP-specific configurations
+# Single source of truth for all TDP platform controls.
+TDP-Settings:
+  # Gateway configuration controls which network exposure method is used.
+  # Ingress and Gateway API are mutually exclusive — only one should be enabled.
+  gateway:
+    # Enable Kubernetes Ingress resources for Kafka UI
+    ingress:
+      enabled: false
+    # Enable Kubernetes Gateway API (HTTPRoute) resources for Kafka UI
+    gatewayApi:
+      enabled: false

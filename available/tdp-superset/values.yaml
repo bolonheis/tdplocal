@@ -1,0 +1,546 @@
+# ==============================================================================
+# TDP (Tecnisys Data Platform) - Tecnisys
+# Helm chart values for Apache Superset
+#
+# Usage:
+# - Edit this file to configure the chart.
+# - Prefer placeholders over real secrets; provide secrets via Kubernetes Secret
+#   or via Helm --set / external tooling.
+# - Keep a single source of truth: values.yaml.
+# ==============================================================================
+
+# Global chart values
+# Define top-level chart-wide settings for all subcharts in the TDP Helm values.
+# Contains common settings like imagePullSecrets and extraLabels.
+# Serves as a single source of truth for global overrides across subcharts.
+global:
+  security:
+    allowInsecureImages: true
+  extraLabels: {}
+  compatibility:
+    openshift:
+      adaptSecurityContext: force
+
+
+# Enable/disable Superset deployment
+tdp-superset:
+  enabled: true
+
+  # Custom TDP image with database drivers and LDAP deps pre-installed
+  image:
+    repository: registry.tecnisys.com.br/tdp/images/superset
+    tag: "5.0.0-1"
+    pullPolicy: IfNotPresent
+
+  imagePullSecrets:
+    - name: tdp-registry
+
+  # `extraLabels` lands on each resource's own metadata.labels (verified
+  # via `helm template`, not just pod labels), so it also carries the
+  # Tecnisys licensing opt-in (tecnisys.com/licensed, tecnisys.com/product)
+  # for the Superset node/worker/celerybeat Deployments. See
+  # stack/manifests/platform/tdp-platform-license.yaml (one shared whole-platform policy) — requires
+  # tdp-license-crds and tdp-license-operator to be installed. Remove the
+  # two tecnisys.com/* labels here (and under postgresql.commonLabels /
+  # redis.commonLabels below) to opt this chart out of enforcement.
+  extraLabels:
+    tecnisys.io/cluster: "tdp"
+    tecnisys.com/licensed: "true"
+    tecnisys.com/product: tdp-superset
+
+  postgresqlSecrets:
+    name: ""
+    passwordKey: "superset-postgresql-password"
+
+  # Bootstrap script executed before Superset starts
+  # Database drivers and LDAP deps are pre-installed in the custom image
+  # (see stack/images/superset/Dockerfile)
+  bootstrapScript: |
+    #!/bin/bash
+    if [ ! -f ~/bootstrap ]; then
+      echo "Running Superset with uid {{ .Values.runAsUser }}" > ~/bootstrap
+      echo "Bootstrap completed successfully"
+    fi
+
+  # Secret key for Superset
+  extraSecretEnv:
+    SUPERSET_SECRET_KEY: 'SUPERSET_SECRET_KEY'
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# External Database: When TDP-Settings.externalDatabase.enabled=true,
+# uncomment DB_PASS below so the password is read from the dynamically
+# created Secret. Also set tdp-superset.postgresql.enabled=false and update
+# supersetNode.connections.db_host / db_pass accordingly.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# LDAP Integration: To enable LDAP authentication:
+  # 1. Set tdp-superset.ldap.enabled=true below (or via values-tdp-ldap.yaml)
+  # 2. Fill in the LDAP placeholders (server URL, bind user, search base, etc.)
+  # 3. Uncomment the LDAP env vars section below
+  # 4. Create the secret:
+  #    kubectl create secret generic tdp-superset-ldap-secret \
+  #      --from-literal=bind-password=<password> -n <namespace>
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  extraEnvRaw:
+    # Uncomment when TDP-Settings.externalDatabase.enabled=true
+    # - name: DB_PASS
+    #   valueFrom:
+    #     secretKeyRef:
+    #       name: tdp-superset-postgresql-secrets
+    #       key: superset-postgresql-password
+    
+    # LDAP: every non-secret field below is now read directly from
+    # tdp-superset.ldap.* by configOverrides.ldap_config (tpl-rendered by
+    # the vendored chart) — see that block further down in this file. The
+    # bind password is the one field that MUST stay here as a real env var,
+    # since Helm cannot template a live Secret's value into a ConfigMap.
+    # Uncomment when enabling LDAP (matches ldap.bind.passwordSecret below):
+    # - name: AUTH_LDAP_BIND_PASSWORD
+    #   valueFrom:
+    #     secretKeyRef:
+    #       name: tdp-superset-ldap-secret
+    #       key: bind-password
+
+  ldap:
+    # Enable/disable LDAP authentication. Genuinely consumed by
+    # configOverrides.ldap_config below (tpl-rendered by the vendored
+    # chart) — mirrors the same pattern tdp-airflow.ldap already uses.
+    # The bind password is the only field NOT read from here directly;
+    # see extraEnvRaw above and bind.passwordSecret below.
+    enabled: false
+    server:
+      url: "ldap://<ldap-host>:389"
+      useTls: "False"
+    bind:
+      user: "cn=admin,dc=<domain>,dc=local"
+      passwordSecret:
+        name: "tdp-superset-ldap-secret"
+        key: "bind-password"
+    search:
+      base: "ou=users,dc=<domain>,dc=local"
+      filter: "(objectClass=person)"
+      uidField: "uid"
+    userAttributes:
+      firstname: "givenName"
+      lastname: "sn"
+      email: "mail"
+    registration:
+      enabled: "True"
+      defaultRole: "Public"
+    roleMapping: {}
+    groupField: "memberOf"
+    roleSyncAtLogin: "True"
+
+  # Service configuration
+  service:
+    type: ClusterIP
+    port: 8088
+    annotations: {}
+
+  # Ingress configuration — controlled exclusively by
+  # TDP-Settings.gateway.ingress.enabled below. Do NOT set `enabled: true`
+  # here: because of the `alias: tdp-superset` in Chart.yaml, this whole
+  # block (including `enabled`) is passed straight through as
+  # `.Values.ingress` to the vendored Superset subchart, whose own
+  # templates/ingress.yaml renders its OWN Ingress from this same
+  # `enabled` flag — with the same release name as the wrapper's
+  # templates/ingress.yaml (superset.fullname resolves identically in
+  # both), producing two colliding Ingress objects. templates/ingress.yaml
+  # also fails the render outright if both toggles are ever true at once.
+  ingress:
+    enabled: false
+    ingressClassName: ""
+    annotations: {}
+    path: /
+    pathType: ImplementationSpecific
+    hosts:
+      - superset.${TDP_DOMAIN}
+    tls: []
+
+  # Resource limits and requests
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2
+      memory: 4Gi
+
+  # Superset node configuration
+  supersetNode:
+    replicas:
+      enabled: true
+      replicaCount: 1
+    
+    # Database connection configuration for metadata database
+    connections:
+      # Redis configuration
+      # .Release.Name sanitized to match the redis subchart's actual Service
+      # name (see "Release.Name in a hostname" in CLAUDE.md's Helm charts conventions).
+      redis_host: '{{ regexReplaceAll "(-?[^a-z\\d\\-])+-?" (lower .Release.Name) "-" }}-redis-headless'
+      redis_port: "6379"
+      redis_user: ""
+      redis_cache_db: "1"
+      redis_celery_db: "0"
+      
+      # PostgreSQL configuration
+      # Internal DB (default): uses the chart's PostgreSQL subchart
+      # External DB: set db_host to "<postgresql-service>.<namespace>.svc.cluster.local"
+      #              and db_pass to "" (will be overridden by DB_PASS env var from Secret)
+      db_type: "postgresql"
+      # Same sanitization as redis_host above (see CLAUDE.md).
+      db_host: '{{ regexReplaceAll "(-?[^a-z\\d\\-])+-?" (lower .Release.Name) "-" }}-postgresql'
+      db_port: "5432"
+      db_user: "superset"
+      db_pass: "superset"
+      db_name: "superset"
+
+    env: {}
+    
+    # Liveness probe
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: http
+      initialDelaySeconds: 60
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 5
+
+    # Readiness probe
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: http
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 10
+      failureThreshold: 5
+
+    # Startup probe
+    startupProbe:
+      httpGet:
+        path: /health
+        port: http
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 10
+      failureThreshold: 30
+
+  # Superset worker configuration (Celery)
+  supersetWorker:
+    replicas:
+      enabled: true
+      replicaCount: 1
+    
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: 1
+        memory: 2Gi
+
+  # Celery Beat configuration (scheduled tasks)
+  supersetCeleryBeat:
+    enabled: true
+    
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  # Datasource auto-import configuration
+  datasources:
+    # Enable/disable automatic import of datasources
+    autoImport:
+      enabled: false
+    
+    # ClickHouse datasource configuration
+    clickhouse:
+      enabled: false
+      name: "ClickHouse TDP"
+      host: "<clickhouse-service>.<namespace>.svc.cluster.local"
+      port: "8123"
+      database: "default"
+      username: "<clickhouse-username>"
+      password: "<clickhouse-password>"
+      uuid: "92122244-b262-44a6-a2ed-e49a05860dda"
+    
+    # Trino datasource configuration
+    trino:
+      enabled: false
+      name: "Trino TDP"
+      host: "<trino-service>.<namespace>.svc.cluster.local"
+      port: "8080"
+      catalog: ""
+      username: "<trino-username>"
+      password: "<trino-password>"
+      uuid: "8a92c01b-2d6e-4fc1-a302-b6a5f0e56789"
+
+  # Additional configuration injected into Superset configuration
+  extraConfigs: {}
+
+  # Datasource auto-import volume mount (subPath avoids conflict with extraConfigs)
+  # The ConfigMap is created by the chart template when datasources.autoImport.enabled=true
+  # optional: true ensures pods start normally when autoImport is disabled (no ConfigMap)
+  extraVolumes:
+    - name: superset-datasources
+      configMap:
+        name: "{{ .Release.Name }}-datasources-config"
+        optional: true
+
+  extraVolumeMounts:
+    - name: superset-datasources
+      mountPath: /app/configs/import_datasources.yaml
+      subPath: import_datasources.yaml
+      readOnly: true
+
+  # ── LDAP Authentication (disabled by default) ──────────────────────────────
+  # AUTH_TYPE is set at Helm render time from tdp-superset.ldap.enabled
+  # (mirrors tdp-airflow.ldap.apiServerConfig's own pattern) — otherwise
+  # AUTH_DB (default Superset behavior).
+  # To enable LDAP, layer values-tdp-ldap.yaml on top of this file:
+  #   helm upgrade ... -f values.yaml -f values-tdp-ldap.yaml
+  configOverrides:
+    ldap_config: |
+      {{- if .Values.ldap.enabled }}
+      from flask_appbuilder.security.manager import AUTH_LDAP
+      AUTH_TYPE = AUTH_LDAP
+
+      # Server
+      AUTH_LDAP_SERVER = {{ .Values.ldap.server.url | quote }}
+      AUTH_LDAP_USE_TLS = {{ .Values.ldap.server.useTls }}
+      AUTH_LDAP_TLS_CACERTFILE = env('AUTH_LDAP_TLS_CACERTFILE', '/etc/ssl/certs/ca-certificates.crt')
+
+      # Bind user for LDAP searches (OpenLDAP / FreeIPA)
+      AUTH_LDAP_BIND_USER = {{ .Values.ldap.bind.user | quote }}
+      AUTH_LDAP_BIND_PASSWORD = env('AUTH_LDAP_BIND_PASSWORD', '')
+
+      # User search
+      AUTH_LDAP_SEARCH = {{ .Values.ldap.search.base | quote }}
+      AUTH_LDAP_SEARCH_FILTER = {{ .Values.ldap.search.filter | quote }}
+      AUTH_LDAP_UID_FIELD = {{ .Values.ldap.search.uidField | quote }}
+
+      # User attribute mapping
+      AUTH_LDAP_FIRSTNAME_FIELD = {{ .Values.ldap.userAttributes.firstname | quote }}
+      AUTH_LDAP_LASTNAME_FIELD  = {{ .Values.ldap.userAttributes.lastname | quote }}
+      AUTH_LDAP_EMAIL_FIELD     = {{ .Values.ldap.userAttributes.email | quote }}
+
+      # Auto-register LDAP users in Superset
+      AUTH_USER_REGISTRATION      = {{ .Values.ldap.registration.enabled }}
+      AUTH_USER_REGISTRATION_ROLE = {{ .Values.ldap.registration.defaultRole | quote }}
+
+      # Role mapping – LDAP group DN → list of Superset roles
+      AUTH_ROLES_MAPPING = {{ .Values.ldap.roleMapping | toJson }}
+
+      AUTH_LDAP_GROUP_FIELD = {{ .Values.ldap.groupField | quote }}
+      AUTH_ROLES_SYNC_AT_LOGIN = {{ .Values.ldap.roleSyncAtLogin }}
+
+      # Session lifetime (seconds)
+      import os as _os
+      PERMANENT_SESSION_LIFETIME = int(_os.environ.get('PERMANENT_SESSION_LIFETIME', '1800'))
+      {{- end }}
+
+  # Init job configuration (database migrations)
+  init:
+    enabled: true
+
+    jobAnnotations:
+      "helm.sh/hook": "post-install,post-upgrade"
+      "helm.sh/hook-delete-policy": "before-hook-creation,hook-succeeded"
+      "argocd.argoproj.io/hook": "PostSync"
+      "argocd.argoproj.io/hook-delete-policy": "BeforeHookCreation"
+      "argocd.argoproj.io/sync-wave": "10"
+    
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 2
+        memory: 4Gi
+
+    # Admin user configuration
+    adminUser:
+      username: admin
+      firstname: Admin
+      lastname: User
+      email: admin@superset.com
+      # Use a shell-safe default; override via --set or secret management in real deployments
+      password: "admin"
+
+    # Initialize with example data
+    loadExamples: false
+
+  # Service account
+  serviceAccount:
+    create: true
+    annotations: {}
+
+  # Pod annotations
+  podAnnotations: {}
+
+  # Security context
+  podSecurityContext:
+    enabled: true
+    fsGroup: null
+  securityContext:
+    enabled: true
+    runAsUser: null
+    runAsGroup: null
+
+  # Override upstream runAsUser (default 0/root) for OpenShift compatibility
+  runAsUser: null
+
+  # Node selector
+  nodeSelector: {}
+
+  # Tolerations
+  tolerations: []
+
+  # Affinity
+  affinity: {}
+
+  # ======================================
+  # PostgreSQL dependency (subchart of upstream superset)
+  # Set to false when TDP-Settings.externalDatabase.enabled=true
+  # ======================================
+  postgresql:
+    enabled: true
+    # Bundled internal metadata DB — part of the tdp-superset release, so it
+    # carries the same licensing labels as the rest of the chart (see
+    # tdp-superset.extraLabels above). `commonLabels` lands on this
+    # StatefulSet's own metadata.labels (verified via `helm template`).
+    commonLabels:
+      tecnisys.com/licensed: "true"
+      tecnisys.com/product: tdp-superset
+    auth:
+      postgresPassword: "ChangeMe!2026"
+      password: "superset"
+      username: "superset"
+      database: "superset"
+    image:
+      registry: registry.tecnisys.com.br
+      repository: community/images/bitnamilegacy/postgresql
+      tag: "17.5.0-debian-12-r20"
+    # Use a subdirectory inside the PVC for PostgreSQL data.
+    # Required for OpenShift: avoids permission errors on the volume root
+    # because OpenShift assigns dynamic UIDs and chmod on the mount root fails.
+    postgresqlDataDir: /bitnami/postgresql/data/pgdata
+    primary:
+      podLabels:
+        tecnisys.io/cluster: tdp
+      podSecurityContext:
+        enabled: true
+        fsGroup: null
+      containerSecurityContext:
+        enabled: true
+        runAsUser: null
+        runAsGroup: null
+    volumePermissions:
+      enabled: false
+
+  # ======================================
+  # Redis configuration (subchart of upstream superset)
+  # ======================================
+  redis:
+    enabled: true
+    # Bundled internal cache/broker — part of the tdp-superset release, so
+    # it carries the same licensing labels as the rest of the chart (see
+    # tdp-superset.extraLabels above). `commonLabels` lands on this
+    # StatefulSet's own metadata.labels (verified via `helm template`).
+    commonLabels:
+      tecnisys.com/licensed: "true"
+      tecnisys.com/product: tdp-superset
+    architecture: standalone
+    image:
+      registry: registry.tecnisys.com.br
+      repository: community/images/bitnamilegacy/redis
+      tag: "7.0.10-debian-11-r4"
+    auth:
+      enabled: false
+      password: ""
+    master:
+      podSecurityContext:
+        enabled: true
+        fsGroup: null
+      containerSecurityContext:
+        enabled: true
+        runAsUser: null
+        runAsGroup: null
+      persistence:
+        enabled: false
+        accessModes:
+          - ReadWriteOnce
+    volumePermissions:
+      enabled: false
+
+# Gateway API configuration for exposing Superset UI
+# Used when TDP-Settings.gateway.gatewayApi.enabled is true
+gatewayApi:
+  # Gateway reference - the Gateway resource to attach HTTPRoutes to
+  gatewayClassName: ""
+  # Gateway resource configuration
+  gateway:
+    enabled: false
+    name: ""
+    listeners: []
+  # Parent Gateway references - must be configured with actual Gateway name
+  # Example:
+  # parentRefs:
+  #   - name: my-gateway
+  #     namespace: gateway-system
+  #     sectionName: https  # Optional: specific listener name
+  parentRefs: []
+  
+  # Superset HTTPRoute configuration
+  superset:
+    enabled: true
+    hostnames:
+      - superset.${TDP_DOMAIN}
+    rules:
+      - matches:
+          - path:
+              type: PathPrefix
+              value: /
+        backendRefs:
+          - name: ""  # Will be set to the superset service name in template
+            port: 8088
+    # Optional: TLS configuration via Gateway
+    tls:
+      certificateRefs: []
+      # - name: superset-tls
+      #   namespace: default
+  
+  # Storage class (use cluster default)
+  storageClass: ""
+
+# TDP-specific configurations
+# Single source of truth for all TDP platform controls.
+TDP-Settings:
+  # External database bootstrap Job.
+  # When enabled, a pre-install/pre-upgrade Job will:
+  # 1. Create the Superset database and user in the external PostgreSQL
+  # 2. Generate a random password and store it in a Secret
+  # 3. The Secret is automatically cleaned up on helm uninstall
+  externalDatabase:
+    enabled: false
+    recreate: false
+    externalSecret:
+      # Secret name is: <releaseName>
+      # Expected key: postgres-password (admin password to create databases)
+      releaseName: "tdp-postgresql"
+  # Gateway configuration controls which network exposure method is used.
+  # Ingress and Gateway API are mutually exclusive — only one should be enabled.
+  gateway:
+    # Enable Kubernetes Ingress resources for Superset
+    # When true, Ingress resources will be created based on the 'tdp-superset.ingress' section above
+    ingress:
+      enabled: false
+    # Enable Kubernetes Gateway API resources for Superset
+    # When true, HTTPRoute resources will be created based on the 'gatewayApi' section above
+    gatewayApi:
+      enabled: false

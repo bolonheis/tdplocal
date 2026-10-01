@@ -1,0 +1,407 @@
+# =============================================================================
+# TDP CloudBeaver - Base Configuration
+# =============================================================================
+# Notes:
+# - The chart distribution includes only this file (`values.yaml`).
+# - Files named `values-*` are validated local test/models and are not part of the chart distribution.
+# - Do not store real credentials in this repository. Use a private override values file and/or Kubernetes Secrets.
+#
+# Usage example:
+# helm upgrade --install tdp-cloudbeaver oci://registry.tecnisys.com.br/tdp/charts/tdp-cloudbeaver \
+#   -n tdp-project --create-namespace \
+#   -f values.yaml
+# =============================================================================
+
+global:
+  compatibility:
+    openshift:
+      adaptSecurityContext: auto
+
+tdp-cloudbeaver:
+  enabled: true
+  # Dynamic names based on Helm Release.Name
+  fullnameOverride: ""
+  # `commonLabels` lands on the Deployment's own metadata.labels (verified
+  # via `helm template`), so it also carries the Tecnisys licensing opt-in
+  # (tecnisys.com/licensed, tecnisys.com/product). See
+  # stack/manifests/platform/tdp-platform-license.yaml (one shared whole-platform policy) — requires
+  # tdp-license-crds and tdp-license-operator to be installed. Remove the
+  # two tecnisys.com/* labels to opt this chart out of enforcement.
+  commonLabels:
+    tecnisys.io/cluster: tdp
+    tecnisys.com/licensed: "true"
+    tecnisys.com/product: tdp-cloudbeaver
+  # Cluster label for selector compatibility with kustomize post-renderer
+  # CloudBeaver (Bitnami) uses podLabels for custom labels in selectors
+  podLabels:
+    tecnisys.io/cluster: tdp
+  
+  # CloudBeaver image configuration
+  image:
+    registry: registry.tecnisys.com.br
+    repository: community/images/dbeaver/cloudbeaver
+    tag: 25.3.0
+    pullPolicy: IfNotPresent
+
+  # Container port configuration
+  containerPorts:
+    http: 8978
+
+  # Service configuration
+  service:
+    enabled: true
+    type: ClusterIP
+    ports:
+      http: 8978
+    nodePorts:
+      http: ""
+
+  # Persistence configuration for CloudBeaver workspace
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    existingClaim: ""
+    mountPath: /opt/cloudbeaver/workspace
+
+  # Liveness and Readiness probes
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 60
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 5
+
+  readinessProbe:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 5
+
+  # Resource limits and requests
+  resources:
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+
+  # Security context for pod and container
+  podSecurityContext:
+    enabled: true
+    fsGroup: 8978
+    fsGroupChangePolicy: Always
+
+  containerSecurityContext:
+    enabled: true
+    runAsUser: 8978
+    runAsGroup: 8978
+    runAsNonRoot: true
+    privileged: false
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: "RuntimeDefault"
+
+  # Ingress configuration — controlled exclusively by TDPConfiguration.gateway.ingress.enabled
+  ingress:
+    ingressClassName: ""
+    hostname: cloudbeaver.${TDP_DOMAIN}
+    path: /
+    pathType: ImplementationSpecific
+    tls: false
+
+  # ---------------------------------------------------------------------------
+  # Application-level behavior toggles
+  # ---------------------------------------------------------------------------
+  app:
+    # Allow authenticated users to create their OWN database connections.
+    #   true  -> the "New connection" action is available to logged-in users
+    #   false -> users can only use predefined/admin-managed connections (default)
+    # Typically enabled together with LDAP/AD so directory users can add connections.
+    # (An env var CLOUDBEAVER_APP_SUPPORTS_CUSTOM_CONNECTIONS still overrides this.)
+    supportsCustomConnections: false
+
+  # Extra environment variables (if needed)
+  extraEnvVars: []
+  
+  # =============================================================================
+  # LDAP AUTHENTICATION CONFIGURATION (disabled by default)
+  # =============================================================================
+  # LDAP authentication settings for CloudBeaver Community Edition.
+  # When enabled, the "ldap" provider is added to enabledAuthProviders in
+  # cloudbeaver.conf and an authConfigurations block is injected into
+  # .cloudbeaver.auto.conf so CloudBeaver picks it up on first start.
+  #
+  # Enable via values-tdp-ldap.yaml overlay:
+  #   helm upgrade --install <release> <chart> -n <ns> -f values.yaml -f values-tdp-ldap.yaml
+  ldap:
+    enabled: false
+    server:
+      host: ""
+      port: 389
+      useSSL: false
+    bind:
+      dn: ""
+      # Bind password is read from a Kubernetes Secret at runtime.
+      # The initContainer injects it into cloudbeaver.conf before CloudBeaver starts.
+      # Create the secret before deploying:
+      #   kubectl -n <NS> create secret generic tdp-cloudbeaver-ldap-bind \
+      #     --from-literal=password='<LDAP_BIND_PASSWORD>'
+      passwordSecretName: ""
+      passwordSecretKey: "password"
+    userSearch:
+      baseDN: ""
+      filter: "(objectClass=person)"
+      userIdAttribute: "uid"
+      userNameAttribute: "givenName"
+      loginAttribute: "uid"
+  
+ 
+  # autoConfig: nova abordagem via .cloudbeaver.auto.conf (CloudBeaver >= 24.x)
+  # Ative autoConfig.enabled OU initialData.enabled (não ambos).
+  autoConfig:
+    enabled: false
+    name: tdp-cloudbeaver-auto-config
+    serverName: "CloudBeaver"
+    serverURL: "http://0.0.0.0:8978"
+    adminName: cbadmin  # THE adminName CANNOT BE admin.
+    adminPassword: ""  # REQUIRED when adminSecret.enabled is false
+
+  # initialData: abordagem legada via initial-data.conf (mantida para compatibilidade)
+  initialData:
+    enabled: true
+    name: tdp-cloudbeaver-initial-data
+    adminName: cbadmin  # THE adminName CANNOT BE admin.
+
+  # Admin credentials Secret (created as pre-install hook)
+  # Password is defined here and used by initial-data.conf via lookup
+  adminSecret:
+    enabled: true
+    name: tdp-cloudbeaver-admin-secret
+    data:
+      password: S3nh4Sup3rF0rt3  # CHANGE THIS IN PRODUCTION!
+
+  # =============================================================================
+  # DATASOURCES CONFIGURATION (disabled by default)
+  # =============================================================================
+  dataSources:
+    enabled: false
+    name: tdp-cloudbeaver-data-sources
+    # Trino (disabled by default)
+    enabledTrino: false
+    nameConnector: "Trino TDP"
+    trinoHost: ""
+    trinoPort: 8080
+    # ClickHouse (disabled by default)
+    enabledClickhouse: false
+    clickhouseHost: ""
+    clickhousePort: 8123
+    # Common settings
+    database: "default"
+    user: ""
+
+    # Optional helper to store the ClickHouse TDP user password in a Secret managed by this chart.
+    # If enabled, the password is also embedded into the generated data-sources.json.
+    clickhouseTdpUser:
+      enabled: false
+      password: ""
+
+    # Secret reference (kept for compatibility with the integration examples)
+    passwordSecret:
+      name: ""
+      key: password
+
+    # Legacy Secret creation (generic) - use only for local/dev.
+    secret:
+      enabled: false
+      name: ""
+      data:
+        password: ""
+
+  # Extra volumes for configurations
+  extraVolumes:
+    - name: cloudbeaver-conf
+      configMap:
+        name: '{{ .Release.Name }}-cloudbeaver-conf'
+    - name: initial-data
+      configMap:
+        name: tdp-cloudbeaver-initial-data
+    - name: data-sources
+      configMap:
+        name: tdp-cloudbeaver-data-sources
+
+  extraVolumeMounts:
+    - name: cloudbeaver-conf
+      mountPath: /opt/cloudbeaver/conf/cloudbeaver.conf
+      subPath: cloudbeaver.conf
+      readOnly: true
+    - name: initial-data
+      mountPath: /opt/cloudbeaver/conf/initial-data.conf
+      subPath: initial-data.conf
+      readOnly: true
+    - name: data-sources
+      mountPath: /opt/cloudbeaver/bootstrap/data-sources.json
+      subPath: data-sources.json
+      readOnly: true
+
+  # InitContainer to sync configurations into the workspace
+  initContainers:
+    - name: sync-workspace-config
+      image: registry.tecnisys.com.br/community/images/busybox:1.36
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          DATA_DIR=/opt/cloudbeaver/workspace/.data
+
+          # ------------------------------------------------------------------
+          # Remove stale runtime conf so CloudBeaver regenerates it from the
+          # Helm-managed cloudbeaver.conf on every (re)start.
+          # ------------------------------------------------------------------
+          if [ -f "$DATA_DIR/.cloudbeaver.runtime.conf" ]; then
+            echo "Removing stale runtime conf to apply Helm-managed configuration..."
+            rm -f "$DATA_DIR/.cloudbeaver.runtime.conf" || echo "Warning: Could not remove runtime conf (permission denied or file in use)"
+          fi
+
+          # ------------------------------------------------------------------
+          # Copy data-sources.json into workspace (first run only)
+          # ------------------------------------------------------------------
+          TARGET=/opt/cloudbeaver/workspace/GlobalConfiguration/.dbeaver/data-sources.json
+          if [ ! -f "$TARGET" ]; then
+            echo "Copying data-sources.json to workspace..."
+            mkdir -p "$(dirname "$TARGET")"
+            chmod 777 "$(dirname "$TARGET")"
+            cp /opt/cloudbeaver/bootstrap/data-sources.json "$TARGET"
+            chmod 667 "$TARGET"
+            echo "Data sources configuration copied successfully."
+          else
+            echo "Data sources configuration already exists, skipping copy."
+          fi
+      volumeMounts:
+        - name: data
+          mountPath: /opt/cloudbeaver/workspace
+        - name: data-sources
+          mountPath: /opt/cloudbeaver/bootstrap
+
+  # =============================================================================
+  # POSTGRESQL DATABASE FOR CLOUDBEAVER METADATA (optional)
+  # =============================================================================
+  # External PostgreSQL database configuration for CloudBeaver metadata
+  # When enabled, creates database and user before CloudBeaver starts
+  # See: https://github.com/dbeaver/cloudbeaver/wiki/Server-configuration#database-configuration
+  database:
+    enabled: false           # Set to true to use external PostgreSQL
+    type: "postgresql"       # Database type (currently only postgresql supported)
+    host: ""                 # PostgreSQL host (e.g., tdp-postgresql.tdp-postgresql.svc.cluster.local)
+    port: "5432"             # PostgreSQL port
+    databaseName: ""         # Database name to create (e.g., cloudbeaver_db)
+    schema: "public"         # Database schema
+    user: ""                 # CloudBeaver database user (e.g., cloudbeaver_user)
+    driver: "postgres-jdbc"  # CloudBeaver database driver
+    
+    # Secret containing CloudBeaver database user password
+    passwordSecret:
+      name: ""               # Name of Secret containing CloudBeaver DB password
+      key: "password"        # Key in Secret containing password
+    
+    # Secret containing PostgreSQL admin (postgres user) password
+    # Used by the database creation job
+    postgresSecret:
+      name: ""               # Name of Secret containing postgres admin password
+      key: "postgres-password"  # Key in Secret
+    
+    # Optional: Create Secret for CloudBeaver database user via Helm
+    # In prodtruen, use external secret management instead
+    secret:
+      enabled: false         # Set to true to create Secret via Helm
+      name: ""               # Name of the Secret to create
+      data: {}               # Key-value pairs (e.g., password: "dbpass123")
+  
+  # Node selector, tolerations and affinity
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# External services configuration
+# Use this section to reference external PostgreSQL instances
+externalServices:
+  postgresql:
+    # Release name of the PostgreSQL chart (if deployed via Helm in the same cluster)
+    # Example: "tdp-postgresql-project"
+    releaseName: ""
+    
+    # Namespace where PostgreSQL is deployed
+    # Example: "tdp-project"
+    namespace: ""
+    
+    # Full host (use this if not using releaseName/namespace)
+    # If specified, this takes precedence over releaseName/namespace
+    # Example: "my-postgres.example.com"
+    host: ""
+    
+    # PostgreSQL port
+    port: 5432
+    
+    # Secret name containing postgres admin password
+    # If empty, defaults to {{ .Values.externalServices.postgresql.releaseName }}
+    secretName: ""
+    
+    # Secret key for postgres admin password
+    secretKey: "postgres-password"
+
+# Gateway API configuration for exposing CloudBeaver UI
+# Used when TDPConfiguration.gateway.gatewayApi.enabled is true
+gatewayApi:
+  # Gateway reference - the Gateway resource to attach HTTPRoutes to
+  gatewayClassName: ""
+  # Parent Gateway references - must be configured with actual Gateway name
+  # Example:
+  # parentRefs:
+  #   - name: my-gateway
+  #     namespace: gateway-system
+  #     sectionName: https  # Optional: specific listener name
+  parentRefs: []
+  
+  # CloudBeaver HTTPRoute configuration
+  cloudbeaver:
+    enabled: true
+    hostnames:
+      - cloudbeaver.${TDP_DOMAIN}
+    rules:
+      - matches:
+          - path:
+              type: PathPrefix
+              value: /
+        backendRefs:
+          - name: ""  # Will be set to the cloudbeaver service name in template
+            port: 8978
+    # Optional: TLS configuration via Gateway
+    tls:
+      certificateRefs: []
+      # - name: cloudbeaver-tls
+      #   namespace: default
+
+# TDP-specific configurations
+TDP-Settings:
+  # Gateway configuration controls which network exposure method is used
+  gateway:
+    # Enable Kubernetes Ingress resources for CloudBeaver
+    # When true, Ingress resources will be created based on the 'cloudbeaver.ingress' section above
+    ingress:
+      enabled: false
+    # Enable Kubernetes Gateway API resources for CloudBeaver
+    # When true, HTTPRoute resources will be created based on the 'gatewayApi' section above
+    # Note: Gateway API and Ingress are mutually exclusive - only one should be enabled
+    gatewayApi:
+      enabled: false

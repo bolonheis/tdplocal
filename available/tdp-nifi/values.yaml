@@ -1,0 +1,410 @@
+# ==============================================================================
+# TDP (Tecnisys Data Platform) - Tecnisys
+# Helm chart values for Apache NiFi with NiFiKop and ZooKeeper
+#
+# Usage:
+# - Edit this file to configure the chart.
+# - Prefer placeholders over real secrets; provide secrets via Kubernetes Secret
+#   or via Helm --set / external tooling.
+# - Keep a single source of truth: values.yaml.
+# - Environment-specific configurations: use values-{env}.yaml files.
+# ==============================================================================
+
+tdp-nifi:
+  enabled: true
+
+# Global configuration
+global:
+  security:
+    allowInsecureImages: true
+
+# cert-manager subchart configuration
+cert-manager:
+  enabled: false
+
+# Configurations for ZooKeeper
+zookeeper:
+  # Dynamic names based on Helm's Release.Name
+  # Example: helm install tdp-labs -> pods with the prefix tdp-labs-zookeeper
+  fullnameOverride: ""
+  # tecnisys.com/licensed + tecnisys.com/product wire ZooKeeper's StatefulSet
+  # (its own metadata.labels, via the bitnami "common.labels.standard" helper -
+  # verified with `helm template` to land exactly once, no duplication) into
+  # tdp-license-operator enforcement. See
+  # stack/manifests/platform/tdp-platform-license.yaml (one shared whole-platform policy). ZooKeeper is an internal
+  # dependency of the NiFi cluster (coordination/leader-election) rather than
+  # a standalone product, so it is deliberately governed by the SAME
+  # tdp-nifi LicensePolicy/PlatformLicense pair, not its own - scaling it to
+  # zero degrades/breaks NiFi clustering as part of enforcement. Remove both
+  # tecnisys.com/* keys below to opt ZooKeeper out.
+  commonLabels:
+    tecnisys.io/cluster: "tdp"
+    tecnisys.com/licensed: "true"
+    tecnisys.com/product: tdp-nifi
+  podLabels:
+    tecnisys.io/cluster: "tdp"
+  image:
+    registry: registry.tecnisys.com.br
+    repository: community/images/bitnamilegacy/zookeeper
+    tag: 3.9.3-debian-12-r15
+  replicaCount: 1
+  auth:
+    enabled: false
+  allowAnonymousLogin: true
+  persistence:
+    enabled: true
+    ##storageClass: local-path
+    size: 4Gi
+
+# Configurations for NiFiKop (operator)
+#
+# IMPORTANT - licensing enforcement caveat: NiFiKop does not manage the NiFi
+# cluster's actual compute via a Deployment/StatefulSet/CronJob. Each NiFi
+# node is a bare Pod created directly by the NiFiKop controller (see
+# pkg/resources/nifi/pod.go in konpyutaika/nifikop - corev1.Pod with
+# GenerateName, no owning Deployment/ReplicaSet/StatefulSet), so
+# tdp-license-operator - which only watches Deployments/StatefulSets/CronJobs
+# (see pkg/enforcement/enforcement.go) - cannot enforce directly on NiFi's
+# processing pods no matter what labels are set on the NifiCluster CR or
+# nifiCluster.pod.labels below (those only reach Pod objects, which the
+# operator never inspects). As a best-effort compensating control, this
+# chart instead labels the NiFiKop OPERATOR's own Deployment below: scaling
+# it to zero stops it from reconciling/recreating NiFi node Pods, so
+# capacity degrades to zero as pods are naturally disrupted (restarts, node
+# drains, OOM, etc.) rather than being torn down immediately like
+# tdp-trino/tdp-argo. See stack/manifests/platform/tdp-platform-license.yaml (one shared whole-platform policy) and
+# docs/tdp-license-operator-deployment.md. True immediate enforcement would
+# require either extending tdp-license-operator to enforce on Pods owned by
+# a NifiCluster, or wiring a pause/suspend field on the NifiCluster CR itself
+# (not currently exposed) - out of scope here. Remove both tecnisys.com/*
+# keys below to opt the nifikop Deployment out.
+nifikop:
+  enabled: true
+  watchOwnNamespace: true
+  version: "1.16.0"
+  labels:
+    tecnisys.io/cluster: "tdp"
+    tecnisys.com/licensed: "true"
+    tecnisys.com/product: tdp-nifi
+  image:
+    repository: "registry.tecnisys.com.br/community/images/konpyutaika/nifikop"
+    tag: "v1.16.0-release"
+  certManager:
+    # Requires cert-manager when nifikop.webhook.enabled=true
+    enabled: false
+  webhook:
+    # When enabled, operator admission webhooks are installed
+    enabled: false
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "750m"
+    limits:
+      memory: "512Mi"
+      cpu: "750m"
+
+# Configurations for  NiFiCluster (sample tdp-nifi-cluster)
+nifiCluster:
+
+  # Centralized security configuration (HTTPS + LDAP)
+  security:
+    enabled: false
+    protocol: "http"  # http or https
+    host: "nifi.${TDP_DOMAIN}"
+    additionalProxyHosts: []
+    port: 8080  # 8080  http, 8443  https
+    authorization:
+      mode: "file"  # file or ranger
+      ranger:
+        # Absolute paths: confirmed live (exec into the tdp-dev/images/nifi
+        # image) that "../nifi/conf/..." (Ranger's generic example default,
+        # assuming an HDP-style layout with a sibling "nifi" directory)
+        # resolves to NOTHING in this image - NiFi is installed entirely
+        # under /opt/nifi/nifi-current, with no such sibling directory. The
+        # real fatal error observed: "AuthorizerCreationException:
+        # ../nifi/conf/ranger-nifi-security.xml does not exist, or can not
+        # be read", which brings NiFi down as soon as authorization.mode=
+        # ranger is used. These 3 files (audit/security/policymgr-ssl) are
+        # the same ones generated by the nifi-ranger-plugin-config-secret.
+        # yaml Secret when pluginConfigSecret.enabled=true - whoever enables
+        # this also needs to mount that Secret under nodeConfigGroups.
+        # <group>.externalVolumeConfigs (mountPath /opt/nifi/ranger-conf),
+        # since no template in this chart performs that mount automatically.
+        auditConfigPath: "/opt/nifi/ranger-conf/ranger-nifi-audit.xml"
+        securityConfigPath: "/opt/nifi/ranger-conf/ranger-nifi-security.xml"
+        serviceType: "nifi"
+        applicationId: "tdp_nifi"
+        adminIdentity: ""
+        kerberosEnabled: false
+        pluginConfigSecret:
+          enabled: false
+          name: "nifi-ranger-plugin-config"
+        audit:
+          enabled: true
+          destinationSolr: true
+          destinationSolrUrls: "NONE"
+          destinationSolrZookeepers: "tdp-ranger-ranger-zk:2181/solr"
+          destinationSolrSpoolDir: "/opt/nifi/nifi-current/logs/ranger-audit/solr/spool"
+          extraProperties: []
+        policy:
+          rangerAdminUrl: "http://tdp-ranger-ranger:6080"
+          sourceImpl: "org.apache.ranger.admin.client.RangerAdminRESTClient"
+          sslConfigFile: "/opt/nifi/ranger-conf/ranger-policymgr-ssl.xml"
+          pollIntervalMs: 30000
+          cacheDir: "/opt/nifi/data/ranger/tdp_nifi/policycache"
+          connectionTimeoutMs: 120000
+          readTimeoutMs: 30000
+          extraProperties: []
+        rangerAdminTls:
+          enabled: false
+          extraProperties: []
+    
+    ldap:
+      enabled: false
+      url: "ldap://openldap-test.tdp-project.svc.cluster.local:10389"
+      searchBase: "ou=people,dc=planetexpress,dc=com"
+      searchFilter: "(&amp;(uid={0})(objectClass=inetOrgPerson))"
+      authenticationStrategy: "SIMPLE"
+      managerDn: "cn=admin,dc=planetexpress,dc=com"
+      managerPassword: "GoodNewsEveryone"
+      referralStrategy: "FOLLOW"
+      identityStrategy: "USE_USERNAME"
+    
+    ssl:
+      enabled: true  # auto-derived from protocol: https
+      secrets:
+        create: true
+        tlsSecretName: "nifi-cluster-ca"        
+        pkiBackend: cert-manager
+        issuerRef:
+          name: selfsigned-issuer
+          kind: Issuer
+
+  readOnlyConfig:
+
+    authorizerConfig:
+      replaceTemplateSecretConfig:
+        name: nifi-authorizers
+        namespace: tdp-project
+        data: authorizers.xml
+
+    bootstrapProperties:
+      overrideConfigs: |
+        java.arg.2=-Xms2g
+        java.arg.3=-Xmx2g
+        java.arg.4=-Duser.timezone=America/Sao_Paulo
+        java.arg.5=-XX:MaxDirectMemorySize=1g
+
+  service:
+    headlessEnabled: true
+    # NiFiKop needs to resolve the headless service while the first node is
+    # still starting. Without this, DNS only publishes Ready endpoints and
+    # the operator can get stuck recreating the node during bootstrap.
+    publishNotReadyAddresses: true
+    labels:
+      clusterName: tdp-nifi
+
+  zkPath: /nifi
+
+  externalServices:
+    - metadata:
+        labels:
+          clusterName: svc-nifi
+      name: tdp-nifi-service
+      spec:
+        portConfigs: []
+        type: NodePort
+
+  clusterImage: "registry.tecnisys.com.br/tdp/images/nifi:1.28.0-0"
+  initContainerImage: "registry.tecnisys.com.br/community/images/bash:5.2.2"
+  initContainers: []
+  oneNifiNodePerNode: true
+  serviceAccount:
+    create: true
+    name: ""
+
+  pod:
+    labels:
+      clusterName: tdp-nifi
+      tecnisys.io/cluster: "tdp"
+    readinessProbe:
+      initialDelaySeconds: 120
+      periodSeconds: 20
+      failureThreshold: 10
+      timeoutSeconds: 10
+    livenessProbe:
+      initialDelaySeconds: 300
+      periodSeconds: 30
+      failureThreshold: 5
+      timeoutSeconds: 10
+
+  nodeConfigGroups:
+    default_group:
+      imagePullPolicy: IfNotPresent
+      isNode: true
+      # On OpenShift, set runAsUser/fsGroup to a UID/GID within the namespace range.
+      # Example range: 1000720000-1000729999 (check with: oc describe namespace <ns>).
+      runAsUser: ""
+      fsGroup: ""
+      imagePullSecrets:
+        - name: tdp-registry
+      serviceAccountName: ""
+      storageConfigs:
+        - name: flowfile-repository
+          mountPath: /opt/nifi/flowfile_repository
+          pvcSpec:
+            accessModes:
+              - ReadWriteOnce            
+            resources:
+              requests:
+                storage: 1Gi
+
+        - name: content-repository
+          mountPath: /opt/nifi/content_repository
+          pvcSpec:
+            accessModes:
+              - ReadWriteOnce            
+            resources:
+              requests:
+                storage: 1Gi
+
+        - name: provenance-repository
+          mountPath: /opt/nifi/provenance_repository
+          pvcSpec:
+            accessModes:
+              - ReadWriteOnce            
+            resources:
+              requests:
+                storage: 1Gi
+
+        - name: logs
+          mountPath: "/opt/nifi/nifi-current/logs"          
+          reclaimPolicy: Delete
+          pvcSpec:
+            accessModes:
+              - ReadWriteOnce            
+            resources:
+              requests:
+                storage: 5Gi
+
+        - name: data
+          mountPath: "/opt/nifi/data"          
+          reclaimPolicy: Delete
+          pvcSpec:
+            accessModes:
+              - ReadWriteOnce            
+            resources:
+              requests:
+                storage: 5Gi
+      resourcesRequirements:
+        limits:
+          cpu: "4"
+          memory: "8Gi"
+        requests:
+          cpu: "2"
+          memory: "4Gi" 
+
+  nodes:
+    - id: 1
+      nodeConfigGroup: "default_group"
+    #- id: 2
+    #  nodeConfigGroup: "default_group"
+    #- id: 3
+    #  nodeConfigGroup: "default_group"
+
+  propagateLabels: true
+
+  nifiClusterTaskSpec:
+    retryDurationMinutes: 10
+
+  listenersConfig:
+    internalListeners:
+      - containerPort: 6007
+        type: cluster
+        name: cluster
+      - containerPort: 10000
+        type: s2s
+        name: s2s
+      - containerPort: 9090
+        type: prometheus
+        name: prometheus
+      - containerPort: 6342
+        type: load-balance
+        name: load-balance
+
+  authorization:
+    enabled: false
+    # Used by NiFiKop after the cluster already exists.
+    managedAdminUsers: []     
+
+    managedReaderUsers: []
+
+    users:
+      enabled: false
+      items: []
+
+    groups:
+      enabled: false
+      items: []
+
+  authorizersSecret:
+    enabled: true
+    # Used to generate the initial authorizers.xml seed consumed by NiFi on startup.
+    # Prefer this section for bootstrap identities and the first admin.
+    name: nifi-authorizers
+    useManagedTemplate: true
+    usersFile: "../data/users.xml"
+    authorizationsFile: "../data/authorizations.xml"
+    legacyAuthorizedUsersFile: ""
+    includeControllerIdentity: true
+    autoGenerateNodeIdentities: true
+    initialUserIdentities:
+      - fry
+      - leela
+    initialAdminIdentity: fry
+    initialAdminGroup: ""
+    additionalNodeIdentities: []
+    nodeGroup: ""
+    authorizersXml: ""
+
+ingress:
+  enabled: false
+  ingressClassName: ""
+  annotations: {}
+  rules: []
+  tls: []
+
+# Gateway API configuration for exposing NiFi UI
+# Used when TDPConfiguration.gateway.gatewayApi.enabled is true
+gatewayApi:
+  # Gateway reference - the Gateway resource to attach HTTPRoutes to
+  gatewayClassName: ""
+  parentRefs: []
+  nifi:
+    enabled: false
+    hostnames:
+      - nifi.${TDP_DOMAIN}
+    rules:
+      - matches:
+          - path:
+              type: PathPrefix
+              value: /
+        backendRefs:
+          - name: ""
+            port: 8080
+    tls:
+      certificateRefs: []
+
+# TDP-specific configurations
+TDP-Settings:
+  # Gateway configuration controls which network exposure method is used
+  gateway:
+    # Enable Kubernetes Ingress resources for NiFi
+    # When true, Ingress resources will be created based on the 'ingress' section above
+    ingress:
+      enabled: false
+    # Enable Kubernetes Gateway API resources for NiFi
+    # When true, HTTPRoute resources will be created based on the 'gatewayApi' section above
+    # Note: Gateway API and Ingress are mutually exclusive - only one should be enabled
+    gatewayApi:
+      enabled: false

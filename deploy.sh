@@ -22,10 +22,12 @@ CURRENT_DIR="${SCRIPT_DIR}/current"
 
 # Set from the command line (see main)
 DOMAIN_OVERRIDE=""       # -d/--domain: overrides TDP_DOMAIN from the variables file
+EXPOSE_OVERRIDE=""       # -e/--expose: overrides TDP_EXPOSE from the variables file
 FORCE_VALUES=false       # --force: overwrite existing current/<component>/values*.yaml
 
 # Variables substituted in templates besides the ones declared in the variables file
-OPTIONAL_VARS=(TDP_DOMAIN TDP_INGRESS_CLASS TDP_STORAGE_CLASS)
+OPTIONAL_VARS=(TDP_DOMAIN TDP_INGRESS_CLASS TDP_STORAGE_CLASS
+    TDP_INGRESS_ENABLED TDP_GATEWAYAPI_ENABLED TDP_GATEWAY_NAME TDP_GATEWAY_NAMESPACE)
 
 # Function to print colored output
 print_info() {
@@ -102,6 +104,27 @@ validate_variables_file() {
     export TDP_INGRESS_CLASS="${TDP_INGRESS_CLASS:-}"
     export TDP_STORAGE_CLASS="${TDP_STORAGE_CLASS:-}"
     print_info "Ingress/Gateway API domain: ${TDP_DOMAIN}"
+
+    # Exposure: TDP_EXPOSE (or -e/--expose) → the mutually exclusive
+    # TDP-Settings.gateway.{ingress,gatewayApi}.enabled switches in values-gitops.yaml
+    [ -n "$EXPOSE_OVERRIDE" ] && TDP_EXPOSE="$EXPOSE_OVERRIDE"
+    case "$(echo "${TDP_EXPOSE:-none}" | tr '[:upper:]' '[:lower:]')" in
+        ingress)    TDP_INGRESS_ENABLED=true;  TDP_GATEWAYAPI_ENABLED=false ;;
+        gatewayapi) TDP_INGRESS_ENABLED=false; TDP_GATEWAYAPI_ENABLED=true ;;
+        none|"")    TDP_INGRESS_ENABLED=false; TDP_GATEWAYAPI_ENABLED=false ;;
+        *)
+            print_error "TDP_EXPOSE must be ingress, gatewayapi or none (got: ${TDP_EXPOSE})"
+            exit 1
+            ;;
+    esac
+    export TDP_INGRESS_ENABLED TDP_GATEWAYAPI_ENABLED
+    export TDP_GATEWAY_NAME="${TDP_GATEWAY_NAME:-}"
+    export TDP_GATEWAY_NAMESPACE="${TDP_GATEWAY_NAMESPACE:-}"
+    if [ "$TDP_GATEWAYAPI_ENABLED" = "true" ] && [ -z "$TDP_GATEWAY_NAME" ]; then
+        print_error "Gateway API exposure needs TDP_GATEWAY_NAME (the Gateway the HTTPRoutes attach to)"
+        exit 1
+    fi
+    print_info "Exposure: ${TDP_EXPOSE:-none}$([ "$TDP_GATEWAYAPI_ENABLED" = "true" ] && echo " (Gateway ${TDP_GATEWAY_NAMESPACE:+$TDP_GATEWAY_NAMESPACE/}${TDP_GATEWAY_NAME})")"
 
     # Validate required variables
     local required_vars=(
@@ -206,13 +229,44 @@ install_argocd() {
         print_success "tdp-crds installed"
     fi
 
-    # Step 2: Install ArgoCD
+    # Step 2: Install ArgoCD, exposed like the components: argo.${TDP_DOMAIN}
+    # through TDP_EXPOSE, so no helm upgrade is needed afterwards
+    local argo_host="argo.${TDP_DOMAIN}"
+    local argo_args=(
+        --set-string "tdp-argo.global.domain=${argo_host}"
+        --set-string "tdp-argo.configs.cm.url=https://${argo_host}"
+        --set "TDP-Settings.gateway.ingress.enabled=${TDP_INGRESS_ENABLED}"
+        --set "TDP-Settings.gateway.gatewayApi.enabled=${TDP_GATEWAYAPI_ENABLED}"
+    )
+    if [ "$TDP_INGRESS_ENABLED" = "true" ]; then
+        argo_args+=(
+            --set "tdp-argo.server.ingress.enabled=true"
+            --set-string "tdp-argo.server.ingress.hostname=${argo_host}"
+        )
+        # Empty TDP_INGRESS_CLASS keeps the chart default, as for the components
+        if [ -n "$TDP_INGRESS_CLASS" ]; then
+            argo_args+=(--set-string "tdp-argo.server.ingress.ingressClassName=${TDP_INGRESS_CLASS}")
+        fi
+    elif [ "$TDP_GATEWAYAPI_ENABLED" = "true" ]; then
+        # The HTTPRoute lives in ARGOCD_NAMESPACE, so an empty TDP_GATEWAY_NAMESPACE
+        # has to be spelled out as TDP_NAMESPACE (what it means for the components).
+        # gatewayApi.gateway.enabled=false: use the shared Gateway, not one per
+        # release; the chart also fails without it when Gateway API is on.
+        argo_args+=(
+            --set "gatewayApi.gateway.enabled=false"
+            --set-string "gatewayApi.parentRefs[0].name=${TDP_GATEWAY_NAME}"
+            --set-string "gatewayApi.parentRefs[0].namespace=${TDP_GATEWAY_NAMESPACE:-$TDP_NAMESPACE}"
+            --set-string "gatewayApi.server.hostnames[0]=${argo_host}"
+        )
+    fi
+
     print_info "Installing tdp-argo v${HELM_CHART_VERSION}..."
     if ! helm upgrade --install tdp-argo \
             "oci://${HELM_CHART_REPO_URL}/tdp-argo" \
             --version "${HELM_CHART_VERSION}" \
             --namespace "${ARGOCD_NAMESPACE}" \
             --set skipCrdCheck=false \
+            "${argo_args[@]}" \
             --wait --timeout 300s; then
         print_error "Failed to install tdp-argo"
         exit 1
@@ -227,6 +281,11 @@ install_argocd() {
         -n "${ARGOCD_NAMESPACE}" --timeout=180s
 
     print_success "ArgoCD is running in namespace: ${ARGOCD_NAMESPACE}"
+    case "$TDP_INGRESS_ENABLED/$TDP_GATEWAYAPI_ENABLED" in
+        true/*) print_info "ArgoCD UI: ${argo_host} (Ingress)" ;;
+        */true) print_info "ArgoCD UI: ${argo_host} (HTTPRoute on Gateway ${TDP_GATEWAY_NAMESPACE:-$TDP_NAMESPACE}/${TDP_GATEWAY_NAME}; its listener must allow routes from ${ARGOCD_NAMESPACE})" ;;
+        *)      print_info "ArgoCD UI not exposed (TDP_EXPOSE=none): kubectl -n ${ARGOCD_NAMESPACE} port-forward svc/tdp-argocd-server 8080:80" ;;
+    esac
     print_info "Admin password: kubectl -n ${ARGOCD_NAMESPACE} get secret tdp-argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
 }
 
@@ -443,13 +502,16 @@ this help. Without components, only current/common/ is rendered.
 
 Options:
   -h, --help              Show this help message
-  --install               Install ArgoCD (tdp-crds + tdp-argo) then apply common resources
+  --install               Install ArgoCD (tdp-crds + tdp-argo) then apply common resources;
+                          the UI is exposed at argo.DOMAIN per -e/TDP_EXPOSE
   -p, --render-only       Render templates to current/ only (no apply)
   -c, --common-only       Apply common resources only (AppProject + Secrets + App of Apps)
   -a, --available-only    Apply the selected components' Application manifests only
   --all-components        Select every component in available/
   -d, --domain DOMAIN     Domain for Ingress/Gateway API hostnames (<component>.DOMAIN);
                           overrides TDP_DOMAIN from the variables file
+  -e, --expose MODE       How components are exposed: ingress, gatewayapi or none;
+                          overrides TDP_EXPOSE (gatewayapi needs TDP_GATEWAY_NAME)
   -v, --variables FILE    Use custom variables file (default: variables.env)
   -f, --force             Overwrite existing current/<component>/values*.yaml
                           (kept by default, as they may hold local edits) and
@@ -478,6 +540,7 @@ Deployment Modes:
 Examples:
   $0 --install -v variables.env.local                        # Full first-time setup
   $0 -p -v variables.env.local -d example.com --all-components  # Hosts like airflow.example.com
+  $0 -p -v variables.env.local -e ingress --force tdp-trino      # Expose Trino through an Ingress
   $0 -p -v variables.env.local && git add current/ && git push  # Refresh current/common only
 
 Components:
@@ -543,6 +606,14 @@ main() {
                     exit 1
                 fi
                 DOMAIN_OVERRIDE="$2"
+                shift 2
+                ;;
+            -e|--expose)
+                if [ -z "${2:-}" ] || [[ "$2" == -* ]]; then
+                    print_error "$1 needs a mode: ingress, gatewayapi or none"
+                    exit 1
+                fi
+                EXPOSE_OVERRIDE="$2"
                 shift 2
                 ;;
             -f|--force)

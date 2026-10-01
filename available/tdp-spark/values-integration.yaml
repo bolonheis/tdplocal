@@ -27,3 +27,14 @@ tdp-spark:
       uri: "thrift://tdp-hive-metastore-metastore.${TDP_NAMESPACE}.svc.cluster.local:9083"
     storage:
       endpoint: "http://tdp-ozone-s3g-rest.${TDP_NAMESPACE}.svc.cluster.local:9878"
+
+spark:
+  # Spark History Server, with the event logs in Ozone next to the warehouse
+  # (spark.historyServer.eventLog.dir, default s3a://warehouse/spark-events).
+  # The S3 endpoint and keys come from tdp-spark.hadoopConfig above; the chart
+  # creates the directory and puts the S3A jars on the drivers' classpath. Its
+  # UI follows TDP_EXPOSE at spark-history.${TDP_DOMAIN}. Needs the "warehouse"
+  # bucket: until it exists the History Server's init container keeps failing
+  # (Init:CrashLoopBackOff) and the pod starts once the bucket is created.
+  historyServer:
+    enabled: true

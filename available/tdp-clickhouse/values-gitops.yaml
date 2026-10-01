@@ -13,3 +13,23 @@ tdp-clickhouse:
 
 ingress:
   ingressClassName: ${TDP_INGRESS_CLASS}
+
+# Exposure (TDP_EXPOSE / deploy.sh -e: ingress | gatewayapi | none). The two
+# switches are mutually exclusive; deploy.sh sets them from TDP_EXPOSE.
+TDP-Settings:
+  gateway:
+    ingress:
+      enabled: ${TDP_INGRESS_ENABLED}
+    gatewayApi:
+      enabled: ${TDP_GATEWAYAPI_ENABLED}
+
+gatewayApi:
+  # Gateway API: the shared Gateway the HTTPRoutes attach to (TDP_GATEWAY_NAME /
+  # TDP_GATEWAY_NAMESPACE). An entry without a name is skipped by the chart.
+  parentRefs:
+    - name: ${TDP_GATEWAY_NAME}
+      namespace: ${TDP_GATEWAY_NAMESPACE}
+  # Use the shared Gateway above, not one per chart. Also required by the charts:
+  # with gatewayApi on, their Gateway template reads gatewayApi.gateway.enabled.
+  gateway:
+    enabled: false

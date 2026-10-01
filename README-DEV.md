@@ -99,6 +99,8 @@ O `variables.env.local` está no `.gitignore`. Ele é lido pelo bash (`source`),
 | `TECNISYS_HELM_REGISTRY_USER`, `TECNISYS_HELM_REGISTRY_TOKEN` | `'robot$tdp+pull'` | Pull dos charts (ArgoCD) e das imagens (secret `tdp-registry`) |
 | `TDP_DOMAIN` | `example.com` | Hosts de Ingress/Gateway API: `airflow.example.com`, … (padrão `tdp.local`; `-d` tem precedência) |
 | `TDP_INGRESS_CLASS`, `TDP_STORAGE_CLASS` | `nginx`, `local-path` | Gravadas em todos os `values-gitops.yaml`; vazio = padrão do chart e a classe padrão do cluster |
+| `TDP_EXPOSE` | `ingress` | Como os componentes com endpoint web são expostos: `ingress`, `gatewayapi` ou `none` (padrão; `-e` tem precedência) |
+| `TDP_GATEWAY_NAME`, `TDP_GATEWAY_NAMESPACE` | `tdp-gateway`, `gateway-system` | Com `gatewayapi`: o Gateway existente ao qual as HTTPRoutes se ligam (obrigatório) |
 
 ### Passo 3 — Instalar os CRDs e o ArgoCD
 
@@ -110,7 +112,7 @@ O que é executado, em ordem:
 
 1. `helm registry login` — autentica no registry OCI.
 2. `helm upgrade --install tdp-crds` — os CRDs do cluster; pulado quando os CRDs do ArgoCD já existem.
-3. `helm upgrade --install tdp-argo` — o ArgoCD em `ARGOCD_NAMESPACE`, com `application.namespaces: "*"`, para gerenciar Applications em qualquer namespace; aguarda o server e o application controller.
+3. `helm upgrade --install tdp-argo` — o ArgoCD em `ARGOCD_NAMESPACE`, com `application.namespaces: "*"`, para gerenciar Applications em qualquer namespace, e a interface exposta em `argo.${TDP_DOMAIN}` conforme `TDP_EXPOSE` (veja o Passo 4); aguarda o server e o application controller.
 4. `envsubst` em `common/` → `current/common/`. Os componentes são renderizados à parte, no Passo 6.
 5. `kubectl apply` de `current/common/` (criando o `TDP_NAMESPACE` se necessário):
    - `argo-gitops-appproject.yaml` — o AppProject da TDP
@@ -128,22 +130,19 @@ O que é executado, em ordem:
 > kubectl rollout restart statefulset argocd-application-controller -n <namespace-do-argocd>
 > ```
 
-### Passo 4 — Expor a interface do ArgoCD (opcional)
+### Passo 4 — Expor a interface do ArgoCD
 
-O `tdp-argo` é instalado sem Ingress. Habilite um e configure a URL do próprio ArgoCD com o mesmo host, para que redirecionamentos e callbacks de SSO funcionem:
+O `--install` expõe a interface do ArgoCD do mesmo jeito que os componentes, sem precisar de `helm upgrade` depois:
 
-```bash
-helm upgrade tdp-argo oci://registry.tecnisys.com.br/tdp/charts/tdp-argo \
-  --version 3.0.2 -n tdp-system --reuse-values \
-  --set TDP-Settings.gateway.ingress.enabled=true \
-  --set tdp-argo.server.ingress.enabled=true \
-  --set tdp-argo.server.ingress.ingressClassName=nginx \
-  --set tdp-argo.server.ingress.hostname=argo.example.com \
-  --set tdp-argo.configs.cm.url=https://argo.example.com
-kubectl -n tdp-system rollout restart deploy/tdp-argocd-server
-```
+| `TDP_EXPOSE` / `-e` | O que o `tdp-argo` recebe |
+| ------------------- | ------------------------- |
+| `ingress` | Um Ingress para `argo.${TDP_DOMAIN}`, com a `TDP_INGRESS_CLASS` (o padrão do chart, `nginx`, quando vazia) |
+| `gatewayapi` | Uma HTTPRoute para `argo.${TDP_DOMAIN}` no `TDP_GATEWAY_NAME` em `TDP_GATEWAY_NAMESPACE` (`TDP_NAMESPACE` quando vazio). A rota fica em `ARGOCD_NAMESPACE`, então o listener do Gateway precisa aceitar rotas desse namespace |
+| `none` | Nenhum Ingress nem rota. Acesse a interface com `kubectl -n <ARGOCD_NAMESPACE> port-forward svc/tdp-argocd-server 8080:80` |
 
-Sem configuração de TLS, o Ingress serve o certificado padrão do controller. Reinstalar o `tdp-argo` descarta essas configurações: guarde as flags junto com as suas notas de instalação.
+Em todos os modos, a URL do próprio ArgoCD (`configs.cm.url`) passa a ser `https://argo.${TDP_DOMAIN}`, para que redirecionamentos e callbacks de SSO batam com o host.
+
+Para mudar a exposição ou o domínio depois, rode `./deploy.sh --install` de novo com as novas configurações. Ele atualiza o `tdp-argo` no lugar, refaz os values a partir do arquivo de variáveis e descarta flags definidas à mão. Sem configuração de TLS, o Ingress serve o certificado padrão do controller.
 
 ### Passo 5 — Publicar o bootstrap e entrar
 
@@ -172,6 +171,10 @@ Sem nomes de componentes, o `deploy.sh` renderiza apenas `current/common/`. Info
 
 # Tudo de available/, com hosts como airflow.example.com
 ./deploy.sh -p -v variables.env.local -d example.com --all-components
+
+# Expostos via Ingress, ou via HTTPRoutes do Gateway API em um Gateway existente
+./deploy.sh -p -v variables.env.local -e ingress tdp-trino tdp-superset
+./deploy.sh -p -v variables.env.local -e gatewayapi tdp-trino tdp-superset   # exige TDP_GATEWAY_NAME
 ```
 
 Cada componente vai para `current/<componente>/`: o manifesto da Application mais até três arquivos de values (veja [Arquivos de values](#arquivos-de-values)).
@@ -179,6 +182,7 @@ Cada componente vai para `current/<componente>/`: o manifesto da Application mai
 - A renderização só adiciona ou atualiza arquivos: componentes que já estão em `current/` e não foram informados continuam lá, para o App of Apps não removê-los (prune).
 - Um `current/<componente>/values*.yaml` existente pode ter edições suas, então ele é **mantido** (com um aviso), a menos que você use `--force`. O manifesto da Application é sempre atualizado.
 - O `deploy.sh` avisa se algo em `current/` apontar para um registry diferente de `registry.tecnisys.com.br`.
+- A **exposição** (`TDP_EXPOSE` / `-e`) define o `TDP-Settings.gateway.ingress.enabled` e o `TDP-Settings.gateway.gatewayApi.enabled` de cada componente no `values-gitops.yaml`; os dois são mutuamente exclusivos. Os hosts são `<componente>.${TDP_DOMAIN}` nos dois modos, os Ingress usam a `TDP_INGRESS_CLASS` e as HTTPRoutes se ligam ao `TDP_GATEWAY_NAME` (o Gateway próprio de cada release, dos charts, fica desligado). Para mudar a exposição de um componente já renderizado, renderize-o de novo com `--force` ou edite o `values-gitops.yaml` dele. O Spark recebe dois hosts, cada um com um Ingress ou uma HTTPRoute: a interface do Master em `spark.${TDP_DOMAIN}` e o History Server em `spark-history.${TDP_DOMAIN}` (ligado no `tdp-spark/values-integration.yaml`, com os event logs em `s3a://warehouse/spark-events`).
 
 ### Passo 7 — Publicar e deixar o ArgoCD sincronizar
 
@@ -220,7 +224,7 @@ Cada Application aplica até três arquivos de values de `current/<componente>/`
 | Arquivo | Conteúdo | Na sincronização de release |
 | --- | --- | --- |
 | `values.yaml` | Padrões do chart (cópia do `values.yaml` do próprio chart) | Substituído pelos novos padrões do chart |
-| `values-gitops.yaml` | Padrões GitOps: correções específicas do ArgoCD (ex.: Jobs de migração do Airflow como hooks Sync), autenticação S3 do Ozone desligada enquanto o Kerberos estiver desligado, a ingress/storage class de `TDP_INGRESS_CLASS`/`TDP_STORAGE_CLASS`, espelhos de imagem em produção | Mantido |
+| `values-gitops.yaml` | Padrões GitOps: correções específicas do ArgoCD (ex.: Jobs de migração do Airflow como hooks Sync), autenticação S3 do Ozone desligada enquanto o Kerberos estiver desligado, a ingress/storage class de `TDP_INGRESS_CLASS`/`TDP_STORAGE_CLASS`, a exposição de `TDP_EXPOSE`, espelhos de imagem em produção | Mantido |
 | `values-integration.yaml` | Integração com os outros componentes TDP em `TDP_NAMESPACE`: catálogos do Trino (hive, iceberg, clickhouse), Spark, Hive Metastore e ClickHouse no S3 do Ozone, datasources do Superset | Mantido |
 
 - Maps são mesclados chave a chave, então um overlay só contém as chaves que muda. Listas e strings de várias linhas são substituídas por inteiro.
@@ -290,13 +294,14 @@ Kits antigos commitavam `current/common/*-secret.yaml` e renderizavam Applicatio
 
 | Flag | Descrição |
 | --- | --- |
-| `--install` | **Primeira instalação**: helm login → tdp-crds → tdp-argo → aguarda ready → renderiza → aplica common |
+| `--install` | **Primeira instalação**: helm login → tdp-crds → tdp-argo (exposto em `argo.${TDP_DOMAIN}` conforme `TDP_EXPOSE`) → aguarda ready → renderiza → aplica common |
 | `-v FILE` | Usar arquivo de variáveis customizado (padrão: `variables.env`) |
 | `-p` | Apenas renderizar → `current/` (sem aplicar) |
 | `-c` | Aplicar apenas recursos comuns (`current/common/`) via kubectl |
 | `-a` | Aplicar apenas as Applications dos componentes selecionados via kubectl (não aplica common) |
 | `--all-components` | Selecionar todos os componentes de `available/` (em vez de listá-los) |
 | `-d DOMAIN` | Domínio dos hostnames de Ingress/Gateway API; tem precedência sobre `TDP_DOMAIN` |
+| `-e MODE` | Exposição: `ingress`, `gatewayapi` ou `none`; tem precedência sobre `TDP_EXPOSE` |
 | `-f`, `--force` | Sobrescrever `current/<componente>/values*.yaml` existentes, e substituir um pull secret `tdp-registry` existente |
 | `-h` | Exibir ajuda |
 
@@ -316,6 +321,9 @@ git add current/ && git commit -m "chore: render" && git push
 
 # Renderizar todos os componentes, com hosts como airflow.example.com
 ./deploy.sh -p -v variables.env.local -d example.com --all-components
+
+# Passar um componente já renderizado para Ingress (--force reescreve os arquivos de values)
+./deploy.sh -p -v variables.env.local -e ingress --force tdp-trino
 
 # Re-aplicar apenas recursos comuns (AppProject, Secrets, App of Apps)
 ./deploy.sh -c -v variables.env.local

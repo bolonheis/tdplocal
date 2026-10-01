@@ -375,10 +375,18 @@ ingress:
   tls: []
 
 # Gateway API configuration for exposing NiFi UI
-# Used when TDPConfiguration.gateway.gatewayApi.enabled is true
+# Used when TDP-Settings.gateway.gatewayApi.enabled is true
 gatewayApi:
-  # Gateway reference - the Gateway resource to attach HTTPRoutes to
+  # GatewayClass of the chart's own Gateway (gateway.enabled=true only)
   gatewayClassName: ""
+  # Optional Gateway created by this chart. Leave disabled to attach the
+  # HTTPRoute to an existing, shared Gateway through parentRefs. TLS
+  # certificates belong on a listener (listeners[].tls), not on the HTTPRoute.
+  gateway:
+    enabled: false
+    name: ""
+    listeners: []
+  # Gateway(s) the HTTPRoute attaches to - entries without a name are skipped
   parentRefs: []
   nifi:
     enabled: false
@@ -389,11 +397,39 @@ gatewayApi:
           - path:
               type: PathPrefix
               value: /
+        # name defaults to nifiCluster.externalServices[0].name and port to
+        # nifiCluster.security.port, so the route follows an http/https switch
         backendRefs:
           - name: ""
-            port: 8080
-    tls:
-      certificateRefs: []
+    # Sticky sessions for a multi-node cluster with login (LDAP/HTTPS): the
+    # Ingress overlays pin each browser to one node with a cookie, and this is
+    # the Gateway API equivalent. Rendered into every rule that has no
+    # sessionPersistence of its own. HTTPRoute sessionPersistence is in the
+    # Gateway API EXPERIMENTAL channel: with standard-channel CRDs the API
+    # server drops the field (and ArgoCD reports a permanent diff), and the
+    # Gateway implementation must support it. Leave empty for a single node or
+    # unsecured NiFi. Example:
+    #   sessionPersistence:
+    #     type: Cookie
+    #     sessionName: NIFI_GW_AFFINITY
+    #     cookieConfig:
+    #       lifetimeType: Session
+    sessionPersistence: {}
+    # With nifiCluster.security.protocol=https the Gateway must re-encrypt to
+    # NiFi: this renders a BackendTLSPolicy for the NiFi external Service.
+    # hostname must be a DNS SAN of the NiFi node certificate; the CA goes in
+    # caCertificateRefs (a ConfigMap with key ca.crt) or, for a publicly
+    # trusted certificate, wellKnownCACertificates: System (not both).
+    # apiVersion: gateway.networking.k8s.io/v1alpha3 for Gateway API < v1.4.
+    backendTLS:
+      enabled: false
+      apiVersion: gateway.networking.k8s.io/v1
+      hostname: ""
+      caCertificateRefs: []
+      #  - group: ""
+      #    kind: ConfigMap
+      #    name: nifi-ca
+      wellKnownCACertificates: ""
 
 # TDP-specific configurations
 TDP-Settings:

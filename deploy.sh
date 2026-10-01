@@ -383,8 +383,15 @@ apply_manifests() {
             print_info "Creating namespace: ${TDP_NAMESPACE}"
             kubectl create namespace "${TDP_NAMESPACE}"
         fi
+        # The App of Apps goes last: applied before the AppProject and the repo
+        # Secrets, ArgoCD reports "project ... does not exist" / auth errors on it.
+        local app_of_apps="$common_src/argo-gitops-app-of-apps.yaml"
+        local common_files=()
         for file in "$common_src"/*.yaml; do
-            [ -f "$file" ] || continue
+            [ -f "$file" ] && [ "$file" != "$app_of_apps" ] && common_files+=("$file")
+        done
+        [ -f "$app_of_apps" ] && common_files+=("$app_of_apps")
+        for file in ${common_files[@]+"${common_files[@]}"}; do
             # Don't replace a tdp-registry Secret someone created by hand (it may
             # cover more registries) unless --force.
             if [ "$(basename "$file")" = "tdp-image-pull-secret.yaml" ] && [ "$FORCE_VALUES" != "true" ] \

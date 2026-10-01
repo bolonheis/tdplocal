@@ -621,7 +621,7 @@ TDP-Settings:
     # Enable Kubernetes Ingress resources for Ozone components
     # When true, Ingress resources will be created based on the 'ingress' section below
     ingress:
-      enabled: false
+      enabled: true
     # Enable Kubernetes Gateway API resources for Ozone components
     # When true, Gateway API resources (HTTPRoute, etc.) will be created
     # Note: Gateway API and Ingress are mutually exclusive - only one should be enabled

@@ -7,6 +7,9 @@
 # cluster default (default StorageClass, default IngressClass).
 
 spark:
+  # e2e test (branch 117), test environment only: one worker to fit the docker-desktop VM.
+  worker:
+    replicaCount: 1
   # e2e test (branch 117), test environment only: spark:4.0.2-2 is not on
   # registry.tecnisys.com.br/tdp yet (checked 2026-10-06), so this docker-desktop
   # test pulls it from the dev Harbor (tdp-registry holds both hosts).

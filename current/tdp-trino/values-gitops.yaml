@@ -28,3 +28,12 @@ gatewayApi:
   # with gatewayApi on, their Gateway template reads gatewayApi.gateway.enabled.
   gateway:
     enabled: false
+
+# --- e2e test (branch 117), test environment only -------------------------------
+tdp-trino:
+  # e2e test (branch 117), test environment only: one worker to fit the docker-desktop VM.
+  server:
+    workers: 1
+    # The worker HPA's minReplicas is server.workers; cap its max too.
+    autoscaling:
+      maxReplicas: 1

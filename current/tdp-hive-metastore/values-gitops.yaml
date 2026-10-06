@@ -1,0 +1,12 @@
+# GitOps overlay for tdp-hive-metastore, layered by ArgoCD after values.yaml.
+tdp-hive-metastore:
+  # e2e test (branch 117), test environment only: hive-metastore:4.0.0-2 is not on
+  # registry.tecnisys.com.br/tdp yet (checked 2026-10-06), so this docker-desktop
+  # test pulls it from the dev Harbor (tdp-registry holds both hosts).
+  metastore:
+    image: registry.engtecnisys.com.br/tdp-dev/images/hive-metastore:4.0.0-2
+  # Component passwords: TDP_*_PASSWORD from variables.env, filled in by deploy.sh.
+  # Kept here, not in values.yaml, because scripts/sync-values-from-charts.sh
+  # overwrites values.yaml with the chart defaults.
+  postgres:
+    password: "awr6shgI2Nqvvqynf8DQ"

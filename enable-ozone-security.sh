@@ -97,13 +97,17 @@ check_chart() {
     local tmp registry_host job
     tmp=$(mktemp -d)
     registry_host=$(echo "${HELM_CHART_REPO_URL}" | cut -d'/' -f1)
-    if ! helm registry login "${registry_host}" --username "${TECNISYS_HELM_REGISTRY_USER}" \
-            --password-stdin <<< "${TECNISYS_HELM_REGISTRY_TOKEN}" >/dev/null 2>&1 \
-        || ! helm pull "oci://${HELM_CHART_REPO_URL}/tdp-ozone" --version "${HELM_CHART_VERSION}" \
+    # An existing helm login first; the kit's registry account only if that fails
+    if ! helm pull "oci://${HELM_CHART_REPO_URL}/tdp-ozone" --version "${HELM_CHART_VERSION}" \
             --untar -d "$tmp" >/dev/null 2>&1; then
-        rm -rf "$tmp"
-        print_warning "Could not pull tdp-ozone ${HELM_CHART_VERSION} from ${HELM_CHART_REPO_URL}: skipped the chart check"
-        return 0
+        if ! helm registry login "${registry_host}" --username "${TECNISYS_HELM_REGISTRY_USER}" \
+                --password-stdin <<< "${TECNISYS_HELM_REGISTRY_TOKEN}" >/dev/null 2>&1 \
+            || ! helm pull "oci://${HELM_CHART_REPO_URL}/tdp-ozone" --version "${HELM_CHART_VERSION}" \
+                --untar -d "$tmp" >/dev/null 2>&1; then
+            rm -rf "$tmp"
+            print_warning "Could not pull tdp-ozone ${HELM_CHART_VERSION} from ${HELM_CHART_REPO_URL}: skipped the chart check"
+            return 0
+        fi
     fi
     job="$tmp/tdp-ozone/templates/kdc-keytab-export-job.yaml"
     if [ -f "$job" ] && grep -q '"argocd.argoproj.io/hook": "Sync"' "$job"; then

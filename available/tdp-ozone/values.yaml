@@ -48,6 +48,12 @@ tdp-ozone:
     tecnisys.io/cluster: tdp
     tecnisys.com/licensed: "true"
     tecnisys.com/product: tdp-ozone
+  # The same pair on the om/scm/datanode/s3g/recon pods (commonLabels stops
+  # at the StatefulSets/Deployment): the operator counts the worker nodes
+  # running TDP from pods (status.capacity). Remove it here too to opt out.
+  podLabels:
+    tecnisys.com/licensed: "true"
+    tecnisys.com/product: tdp-ozone
 
   # Common security context (applied to pod level)
   # Configured to satisfy PodSecurity "restricted" profile
@@ -302,8 +308,20 @@ tdp-ozone:
     command: ~
     # Arguments to launch S3 Gateway (templated)
     args: ["ozone", "s3g"]
+    # Layout of buckets created through the S3 API (S3 CreateBucket).
+    # FILE_SYSTEM_OPTIMIZED (Ozone's own default for non-S3 clients) makes
+    # them usable from both S3 and file-system clients (ofs://, HttpFS —
+    # e.g. tdp-hue's HDFS root); Ozone's S3 default, OBJECT_STORE, is
+    # S3-only ("does not support file system semantics"). Trade-off: object
+    # names become real paths, so keys with "//" or "."/".." segments are
+    # rejected. Only affects NEW buckets — a bucket's layout is fixed at
+    # creation. Wired via s3g.env below (and in values-tdp-kerberos.yaml,
+    # whose s3g.env list replaces this one).
+    defaultBucketLayout: FILE_SYSTEM_OPTIMIZED
     # Additional S3 Gateway environment variables (templated)
-    env: []
+    env:
+      - name: OZONE-SITE.XML_ozone.s3g.default.bucket.layout
+        value: "{{ .Values.s3g.defaultBucketLayout }}"
     # Additional S3 Gateway envFrom items to set up environment variables (templated)
     envFrom: []
     # S3 Gateway resource requests and limits
@@ -451,6 +469,58 @@ tdp-ozone:
       nodePort: ~
       labels: {}
       annotations: {}
+
+  # HttpFS gateway (`ozone httpfs`, ships in the same Ozone image) — a
+  # WebHDFS-compatible REST API (/webhdfs/v1) over Ozone's ofs:// namespace.
+  # Lets WebHDFS clients (e.g. tdp-hue's "Files"/HDFS browser) browse Ozone
+  # directly; S3 buckets show up under /s3v/<bucket>. Rendered by this
+  # wrapper (templates/httpfs-*.yaml), not the vendored subchart.
+  #
+  # Requires kerberos.enabled (values-tdp-kerberos.yaml): HttpFS logs into
+  # Ozone as its own principal (httpfs/httpfs@<realm>, created by the KDC
+  # and exported to the <release>-httpfs-keytab Secret) and impersonates
+  # callers via Hadoop proxy-user rules (OM side: hadoop.proxyuser.httpfs.*
+  # in values-tdp-kerberos.yaml). Client-side auth is `simple` (callers
+  # assert user.name/doAs) — the upstream Hue chart has no hook to run a
+  # Kerberos ticket renewer, so SPNEGO isn't an option for it; networkPolicy
+  # below restricts who can reach the gateway instead.
+  httpfs:
+    enabled: false
+    replicas: 1
+    # Arguments to launch HttpFS (templated)
+    args: ["ozone", "httpfs"]
+    # Additional HttpFS environment variables (templated)
+    env: []
+    # Users allowed to impersonate end users through HttpFS (doAs) —
+    # "hue" is the service user Hue's WebHDFS client always sends.
+    proxyUsers:
+      - hue
+    # How callers authenticate to the gateway:
+    # - simple: callers just assert user.name (no proof) — the NetworkPolicy
+    #   below is the only boundary.
+    # - kerberos: SPNEGO — callers need a ticket from this chart's KDC. The
+    #   KDC then also creates the gateway's HTTP service principal
+    #   HTTP/<release>-httpfs.<namespace>.svc.cluster.local@<realm> (keytab
+    #   Secret <release>-httpfs-http-keytab); clients must call it by that
+    #   FQDN (the SPN is derived from the URL host).
+    clientAuthentication: simple
+    # Client service principals the KDC creates for callers of the gateway:
+    # <name>/<name>@<realm>, keytab exported to Secret <release>-<name>-keytab
+    # (key "keytab") — e.g. "hue" for tdp-hue (its Kerberos short name "hue"
+    # then matches proxyUsers above).
+    clientPrincipals: []
+    resources: {}
+    service:
+      type: ClusterIP
+      port: 14000
+    networkPolicy:
+      # Only pods matching one of these selectors may reach the gateway.
+      # Default: tdp-hue's pods (the upstream Hue chart hardcodes pod=hue).
+      enabled: true
+      from:
+        - podSelector:
+            matchLabels:
+              pod: hue
 
   # Ingress configuration for exposing Ozone UIs
   ingress:
@@ -627,3 +697,22 @@ TDP-Settings:
     # Note: Gateway API and Ingress are mutually exclusive - only one should be enabled
     gatewayApi:
       enabled: false
+
+# Install-time license gate (templates/tdp-license-check.yaml, the same file in
+# every TDP component chart). helm install/upgrade fails, and an ArgoCD sync
+# fails in its PreSync hook, unless tdp-license-operator is running and a
+# PlatformLicense covering this chart's product is VALID or WARNING. Install the
+# operator and the license first: scripts/tdp-license-install.sh (Helm) or
+# deploy.sh --install (GitOps kit).
+licenseCheck:
+  # Product the license must cover. Empty means the chart name; a PlatformLicense
+  # with spec.product "*" covers every chart.
+  product: ""
+  # How recently the operator must have verified the license, which proves it is
+  # still running (it re-verifies every 30s by default).
+  maxStatusAgeSeconds: 600
+  # Hook Job used when the chart is rendered without cluster access (ArgoCD):
+  # any image with bash, kubectl, grep and GNU date.
+  image: registry.tecnisys.com.br/community/images/bitnamilegacy/kubectl:latest
+  imagePullSecrets:
+    - name: tdp-registry

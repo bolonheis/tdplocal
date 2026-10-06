@@ -7,6 +7,21 @@
 # cluster default (default StorageClass, default IngressClass).
 
 tdp-superset:
+  # Component passwords: TDP_*_PASSWORD from variables.env, filled in by deploy.sh.
+  # Kept here, not in values.yaml, because scripts/sync-values-from-charts.sh
+  # overwrites values.yaml with the chart defaults.
+  extraSecretEnv:
+    SUPERSET_SECRET_KEY: '${TDP_SUPERSET_SECRET_KEY}'
+  init:
+    adminUser:
+      password: "${TDP_SUPERSET_ADMIN_PASSWORD}"
+  supersetNode:
+    connections:
+      db_pass: "${TDP_SUPERSET_DB_PASSWORD}"
+  postgresql:
+    auth:
+      postgresPassword: "${TDP_SUPERSET_DB_PASSWORD}"
+      password: "${TDP_SUPERSET_DB_PASSWORD}"
   # Init container of the web/worker/beat Deployments and the init Job; the
   # upstream default (apache/superset:dockerize) is pulled from Docker Hub.
   initImage:

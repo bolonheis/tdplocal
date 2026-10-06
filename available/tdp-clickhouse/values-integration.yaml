@@ -6,8 +6,9 @@
 # Object storage is tdp-ozone's S3 Gateway. Ozone ships with security off
 # (tdp-ozone/values-gitops.yaml), so the gateway does not validate signatures:
 # the access key is only used as the Ozone user name and the secret is ignored.
-# The keys below are NOT real credentials; replace them with Secret-backed ones
-# if Ozone security is enabled. The buckets used here ("warehouse",
+# The keys below are NOT real credentials. With Ozone security on
+# (TDP_OZONE_SECURITY=true, enable-ozone-security.sh), values-ozone-security.yaml
+# replaces them with tdp-ozone's Secret "ozone-s3-credentials". The buckets used here ("warehouse",
 # "clickhouse-data") must exist in Ozone's /s3v volume.
 
 tdp-clickhouse:
@@ -15,9 +16,10 @@ tdp-clickhouse:
     # Users for in-cluster clients: "trino" (tdp-trino clickhouse catalog) and
     # "superset" (tdp-superset datasource). The built-in "default" user only
     # accepts 127.0.0.1, and tdpUser never creates its user, so neither works
-    # for other pods. Example passwords: keep them in sync with
-    # tdp-trino/values-integration.yaml and tdp-superset/values-integration.yaml,
-    # and change all of them before real use.
+    # for other pods. Passwords come from variables.env
+    # (TDP_CLICKHOUSE_TRINO_PASSWORD, TDP_CLICKHOUSE_SUPERSET_PASSWORD), which
+    # tdp-trino/values-integration.yaml and tdp-superset/values-integration.yaml
+    # also use, so the clients stay in sync.
     # This replaces extraUsers from values.yaml as a whole (it is one string),
     # so the <profiles> block is repeated here.
     extraUsers: |
@@ -29,7 +31,7 @@ tdp-clickhouse:
         </profiles>
         <users>
           <trino>
-            <password>change-me-trino</password>
+            <password>${TDP_CLICKHOUSE_TRINO_PASSWORD}</password>
             <networks>
               <ip>::/0</ip>
             </networks>
@@ -37,7 +39,7 @@ tdp-clickhouse:
             <quota>default</quota>
           </trino>
           <superset>
-            <password>change-me-superset</password>
+            <password>${TDP_CLICKHOUSE_SUPERSET_PASSWORD}</password>
             <networks>
               <ip>::/0</ip>
             </networks>

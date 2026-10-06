@@ -63,20 +63,21 @@ zookeeper:
 # node is a bare Pod created directly by the NiFiKop controller (see
 # pkg/resources/nifi/pod.go in konpyutaika/nifikop - corev1.Pod with
 # GenerateName, no owning Deployment/ReplicaSet/StatefulSet), so
-# tdp-license-operator - which only watches Deployments/StatefulSets/CronJobs
-# (see pkg/enforcement/enforcement.go) - cannot enforce directly on NiFi's
-# processing pods no matter what labels are set on the NifiCluster CR or
+# tdp-license-operator - which only scales Deployments/StatefulSets/CronJobs
+# (see pkg/enforcement/enforcement.go) - cannot scale NiFi's processing pods
+# down no matter what labels are set on the NifiCluster CR or
 # nifiCluster.pod.labels below (those only reach Pod objects, which the
-# operator never inspects). As a best-effort compensating control, this
+# operator counts for worker-node capacity and the optional podEnforcement
+# evicts, but never scales). As a best-effort compensating control, this
 # chart instead labels the NiFiKop OPERATOR's own Deployment below: scaling
 # it to zero stops it from reconciling/recreating NiFi node Pods, so
 # capacity degrades to zero as pods are naturally disrupted (restarts, node
 # drains, OOM, etc.) rather than being torn down immediately like
 # tdp-trino/tdp-argo. See stack/manifests/platform/tdp-platform-license.yaml (one shared whole-platform policy) and
-# docs/tdp-license-operator-deployment.md. True immediate enforcement would
-# require either extending tdp-license-operator to enforce on Pods owned by
-# a NifiCluster, or wiring a pause/suspend field on the NifiCluster CR itself
-# (not currently exposed) - out of scope here. Remove both tecnisys.com/*
+# docs/tdp-license-operator-deployment.md. Immediate enforcement on the NiFi
+# nodes comes from tdp-license-operator's optional podEnforcement (off by
+# default): while a license is blocked it evicts them through the
+# nifiCluster.pod.labels below and denies their re-creation. Remove both tecnisys.com/*
 # keys below to opt the nifikop Deployment out.
 nifikop:
   enabled: true
@@ -224,9 +225,17 @@ nifiCluster:
     name: ""
 
   pod:
+    # Labels of every NiFi node pod. The tecnisys.com/* pair opts the nodes
+    # into licensing: tdp-license-operator counts the worker nodes running
+    # TDP from these pods (status.capacity), and the optional podEnforcement
+    # evicts them while the license is blocked. NiFiKop creates them as bare
+    # pods, so this is the only place the label can go. The pair is also
+    # copied to the NifiCluster's own labels. Remove both to opt them out.
     labels:
       clusterName: tdp-nifi
       tecnisys.io/cluster: "tdp"
+      tecnisys.com/licensed: "true"
+      tecnisys.com/product: tdp-nifi
     readinessProbe:
       initialDelaySeconds: 120
       periodSeconds: 20
@@ -444,3 +453,22 @@ TDP-Settings:
     # Note: Gateway API and Ingress are mutually exclusive - only one should be enabled
     gatewayApi:
       enabled: false
+
+# Install-time license gate (templates/tdp-license-check.yaml, the same file in
+# every TDP component chart). helm install/upgrade fails, and an ArgoCD sync
+# fails in its PreSync hook, unless tdp-license-operator is running and a
+# PlatformLicense covering this chart's product is VALID or WARNING. Install the
+# operator and the license first: scripts/tdp-license-install.sh (Helm) or
+# deploy.sh --install (GitOps kit).
+licenseCheck:
+  # Product the license must cover. Empty means the chart name; a PlatformLicense
+  # with spec.product "*" covers every chart.
+  product: ""
+  # How recently the operator must have verified the license, which proves it is
+  # still running (it re-verifies every 30s by default).
+  maxStatusAgeSeconds: 600
+  # Hook Job used when the chart is rendered without cluster access (ArgoCD):
+  # any image with bash, kubectl, grep and GNU date.
+  image: registry.tecnisys.com.br/community/images/bitnamilegacy/kubectl:latest
+  imagePullSecrets:
+    - name: tdp-registry

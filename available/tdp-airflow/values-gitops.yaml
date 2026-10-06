@@ -7,6 +7,18 @@
 # cluster default (default StorageClass, default IngressClass).
 
 tdp-airflow:
+  # Component passwords: TDP_*_PASSWORD from variables.env, filled in by deploy.sh.
+  # Kept here, not in values.yaml, because scripts/sync-values-from-charts.sh
+  # overwrites values.yaml with the chart defaults.
+  webserver:
+    defaultUser:
+      password: "${TDP_AIRFLOW_ADMIN_PASSWORD}"
+  data:
+    metadataConnection:
+      pass: "${TDP_AIRFLOW_DB_PASSWORD}"
+  postgresql:
+    auth:
+      postgresPassword: "${TDP_AIRFLOW_DB_PASSWORD}"
   # Under ArgoCD, Helm post-install hooks become PostSync hooks, which only run
   # after every resource is healthy, while the Airflow pods wait for the
   # migrations before becoming healthy: a deadlock. Run both Jobs as Sync hooks

@@ -41,3 +41,13 @@ gatewayApi:
   # with gatewayApi on, their Gateway template reads gatewayApi.gateway.enabled.
   gateway:
     enabled: false
+
+kafka-ui:
+  # Component passwords: TDP_*_PASSWORD from variables.env, filled in by deploy.sh.
+  # Kept here, not in values.yaml, because scripts/sync-values-from-charts.sh
+  # overwrites values.yaml with the chart defaults.
+  applicationConfig:
+    spring:
+      security:
+        user:
+          password: "${TDP_KAFKA_UI_ADMIN_PASSWORD}"

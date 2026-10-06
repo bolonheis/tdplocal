@@ -6,17 +6,30 @@
 # empty the key renders as null, which removes it and falls back to the chart /
 # cluster default (default StorageClass, default IngressClass).
 
-tdp-cloudbeaver:
-  # Component passwords: TDP_*_PASSWORD from variables.env, filled in by deploy.sh.
-  # Kept here, not in values.yaml, because scripts/sync-values-from-charts.sh
-  # overwrites values.yaml with the chart defaults.
-  adminSecret:
-    data:
-      password: "${TDP_CLOUDBEAVER_ADMIN_PASSWORD}"
-  persistence:
-    storageClass: ${TDP_STORAGE_CLASS}
-  ingress:
-    ingressClassName: ${TDP_INGRESS_CLASS}
+tdp-hue:
+  tdp:
+    # Django secret key (sessions, CSRF): TDP_HUE_SECRET_KEY from variables.env,
+    # filled in by deploy.sh. ArgoCD has no `lookup`, so the chart's random key
+    # would rotate, logging everyone out, on each sync.
+    secretKey:
+      value: '${TDP_HUE_SECRET_KEY}'
+
+# Component passwords: TDP_*_PASSWORD from variables.env, filled in by deploy.sh.
+# Kept here, not in values.yaml, because scripts/sync-values-from-charts.sh
+# overwrites values.yaml with the chart defaults. Without them the bundled
+# PostgreSQL would get new random passwords on every sync (no `lookup` in
+# ArgoCD) while its data keeps the first ones. Hue reads "password" from the
+# Secret tdp-hue-postgresql that this sets.
+postgresql:
+  auth:
+    postgresPassword: "${TDP_HUE_DB_PASSWORD}"
+    password: "${TDP_HUE_DB_PASSWORD}"
+  primary:
+    persistence:
+      storageClass: ${TDP_STORAGE_CLASS}
+
+ingress:
+  ingressClassName: ${TDP_INGRESS_CLASS}
 
 # Exposure (TDP_EXPOSE / deploy.sh -e: ingress | gatewayapi | none). The two
 # switches are mutually exclusive; deploy.sh sets them from TDP_EXPOSE.

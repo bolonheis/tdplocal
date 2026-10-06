@@ -7,6 +7,13 @@
 # cluster default (default StorageClass, default IngressClass).
 
 tdp-jupyter:
+  # Component passwords: TDP_*_PASSWORD from variables.env, filled in by deploy.sh.
+  # Kept here, not in values.yaml, because scripts/sync-values-from-charts.sh
+  # overwrites values.yaml with the chart defaults.
+  hub:
+    config:
+      DummyAuthenticator:
+        password: "${TDP_JUPYTER_ADMIN_PASSWORD}"
   singleuser:
     storage:
       dynamic:

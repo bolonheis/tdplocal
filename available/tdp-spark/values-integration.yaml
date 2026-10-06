@@ -6,8 +6,9 @@
 # Object storage is tdp-ozone's S3 Gateway. Ozone ships with security off
 # (tdp-ozone/values-gitops.yaml), so the gateway does not validate signatures:
 # the access key is only used as the Ozone user name and the secret is ignored.
-# The keys below are NOT real credentials; replace them with Secret-backed ones
-# if Ozone security is enabled. The buckets used here ("warehouse",
+# The keys below are NOT real credentials. With Ozone security on
+# (TDP_OZONE_SECURITY=true, enable-ozone-security.sh), values-ozone-security.yaml
+# replaces them with tdp-ozone's Secret "ozone-s3-credentials". The buckets used here ("warehouse",
 # "clickhouse-data") must exist in Ozone's /s3v volume.
 
 tdp-spark:

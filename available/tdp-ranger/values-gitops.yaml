@@ -7,6 +7,12 @@
 # cluster default (default StorageClass, default IngressClass).
 
 tdp-ranger:
+  # Component passwords: TDP_*_PASSWORD from variables.env, filled in by deploy.sh.
+  # Kept here, not in values.yaml, because scripts/sync-values-from-charts.sh
+  # overwrites values.yaml with the chart defaults.
+  ranger:
+    adminPassword: "${TDP_RANGER_ADMIN_PASSWORD}"
+    dbPassword: "${TDP_RANGER_DB_PASSWORD}"
   solr:
     persistence:
       storageClassName: ${TDP_STORAGE_CLASS}

@@ -7,7 +7,10 @@
 # run it by hand to refresh the kit in this repo after changing a chart's values.
 #
 # Only values.yaml is touched. The GitOps overlays (values-gitops.yaml,
-# values-integration.yaml) and the Application templates are never overwritten.
+# values-integration.yaml) and the Application templates are never overwritten,
+# which is why the ${TDP_*_PASSWORD} placeholders (variables.env) live in those
+# overlays: put them in values.yaml and the next sync replaces them with the
+# chart defaults.
 #
 # Usage: sync-values-from-charts.sh [-t TARGET_DIR] [COMPONENT...]
 #   -t TARGET_DIR  kit directory holding available/ (default: this script's kit)

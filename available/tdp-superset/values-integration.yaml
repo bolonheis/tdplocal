@@ -16,13 +16,13 @@ tdp-superset:
     autoImport:
       enabled: true
 
-    # User "superset" is defined in tdp-clickhouse/values-integration.yaml:
-    # keep the password in sync, and change both before real use.
+    # User "superset" is defined in tdp-clickhouse/values-integration.yaml with
+    # the same variable (TDP_CLICKHOUSE_SUPERSET_PASSWORD in variables.env).
     clickhouse:
       enabled: true
       host: "clickhouse-tdp-clickhouse.${TDP_NAMESPACE}.svc.cluster.local"
       username: "superset"
-      password: "change-me-superset"
+      password: "${TDP_CLICKHOUSE_SUPERSET_PASSWORD}"
 
     # Trino runs without authentication over HTTP: the username is only an
     # identity and the password must stay empty (the Trino client refuses to

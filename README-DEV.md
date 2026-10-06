@@ -36,6 +36,7 @@ tdp-gitops/
 │   │                     #   values.yaml               padrões do chart
 │   │                     #   values-gitops.yaml        padrões GitOps (overlay opcional)
 │   │                     #   values-integration.yaml   integração com outros componentes (overlay opcional)
+│   │                     #   values-ozone-security.yaml segurança do Ozone (só com TDP_OZONE_SECURITY=true)
 │   ├── tdp-clickhouse/
 │   ├── …
 │   └── tdp-trino/
@@ -43,6 +44,7 @@ tdp-gitops/
 │                     # exceto current/common/*-secret.yaml (no .gitignore)
 ├── variables.env     # Variáveis de referência (não editar, copiar para variables.env.local)
 ├── deploy.sh         # Script de renderização e deploy
+├── enable-ozone-security.sh  # Liga a segurança do Ozone (ver Segurança do Ozone)
 └── README.md
 ```
 
@@ -57,7 +59,8 @@ tdp-gitops/
 | Conta no registry | Usuário ou conta robot em `registry.tecnisys.com.br`, usada para os charts e para as imagens privadas |
 | Servidor git | Um repositório vazio que o ArgoCD consiga acessar, e um token para ele |
 | Classes do cluster | Uma IngressClass e uma StorageClass, ou classes padrão no cluster para ambas |
-| Instalados pelo administrador do cluster | `tdp-license` (controle de licença) e `tdp-operator` (operators do Kafka e do ClickHouse), via `helm install`, fora deste fluxo GitOps |
+| Licença da TDP | Dois arquivos da Tecnisys: as chaves públicas confiáveis (`keys.json`) e o lease assinado (`lease.json`). O ArgoCD e todos os componentes da TDP se recusam a instalar sem uma licença VALID; o `deploy.sh --install` instala a licença primeiro (veja o Passo 3) |
+| Instalados pelo administrador do cluster | `tdp-operator` (operators do Kafka e do ClickHouse), via `helm install`, fora deste fluxo GitOps. Como todo chart da TDP, exige a licença instalada antes |
 
 ---
 
@@ -101,8 +104,21 @@ O `variables.env.local` está no `.gitignore`. Ele é lido pelo bash (`source`),
 | `TDP_INGRESS_CLASS`, `TDP_STORAGE_CLASS` | `nginx`, `local-path` | Gravadas em todos os `values-gitops.yaml`; vazio = padrão do chart e a classe padrão do cluster |
 | `TDP_EXPOSE` | `ingress` | Como os componentes com endpoint web são expostos: `ingress`, `gatewayapi` ou `none` (padrão; `-e` tem precedência) |
 | `TDP_GATEWAY_NAME`, `TDP_GATEWAY_NAMESPACE` | `tdp-gateway`, `gateway-system` | Com `gatewayapi`: o Gateway existente ao qual as HTTPRoutes se ligam (obrigatório) |
+| `TDP_LICENSE_PUBLIC_KEYS_FILE`, `TDP_LICENSE_FILE` | `license/keys.json`, `license/lease.json` | Os arquivos de licença da Tecnisys, relativos ao arquivo de variáveis. `license/` está no `.gitignore`. O lease também pode ser o manifesto do Secret `tecnisys-license-lease` |
+| `TDP_LICENSE_NAMESPACE` | `tdp-system` | Onde ficam o `tdp-license-operator` e o `PlatformLicense` (padrão `tdp-system`) |
+| `TDP_LICENSE_POLICY_NAMESPACES` | `tdp,tdp-data` | Namespaces cujos workloads licenciados a licença controla, separados por vírgula (vazio = `TDP_NAMESPACE`) |
+| `TDP_DEFAULT_PASSWORD` | `'ChangeMe!T3c'` | Valor usado por todo `TDP_*_PASSWORD` vazio abaixo |
+| `TDP_<COMPONENTE>_..._PASSWORD` | vazio | Logins de admin das interfaces (Airflow, CloudBeaver, Jupyter, Kafka UI, Ranger, Superset) e os usuários de banco definidos nos values (PostgreSQL embutido do Airflow, Hive, Hue e Superset, Ranger, usuários `trino`/`superset` do ClickHouse); a lista está no `variables.env` |
+| `TDP_SUPERSET_SECRET_KEY` | vazio | `SECRET_KEY` do Superset (assina as sessões e criptografa as senhas de conexão que o Superset guarda). Vazio: o `deploy.sh` mantém a chave já renderizada em `current/tdp-superset/`, ou gera uma na primeira renderização; copie-a para o seu arquivo de variáveis para fixá-la |
+| `TDP_HUE_SECRET_KEY` | vazio | Chave secreta do Hue (assina as sessões e os tokens CSRF). Mesmo tratamento do `TDP_SUPERSET_SECRET_KEY`; uma chave nova desconecta todos os usuários do Hue |
+| `TDP_OZONE_SECURITY` | `false` | Segurança do Ozone (Kerberos e autenticação S3 real). Gravado pelo `enable-ozone-security.sh`; ver [Segurança do Ozone](#segurança-do-ozone) |
+| `TDP_OZONE_KDC_MASTER_PASSWORD` | vazio | Senha mestra do KDC do Ozone, usada uma vez para criar o banco do KDC. Vazio: o `deploy.sh` mantém a que já está em `current/tdp-ozone/`, ou gera uma |
 
-### Passo 3 — Instalar os CRDs e o ArgoCD
+As senhas só entram nos arquivos dos componentes (o `deploy.sh` as valida quando renderiza um componente): no mínimo 8 caracteres de `A-Z a-z 0-9 ! . _ ~ -`, porque são escritas sem escape em YAML, XML, shell, SQL e URIs de banco. Uma credencial compartilhada usa a mesma variável nos dois lados, por exemplo `TDP_CLICKHOUSE_TRINO_PASSWORD` define o usuário `trino` do ClickHouse e o catálogo `clickhouse` do Trino. Elas valem na criação do usuário; trocar depois não altera a senha de um usuário existente, e os `current/<componente>/values*.yaml` já existentes só são renderizados de novo com `--force`. O admin do OpenMetadata (`admin@open-metadata.org` / `admin`) é criado pelo próprio OpenMetadata e não é coberto.
+
+### Passo 3 — Instalar os CRDs, a licença e o ArgoCD
+
+Coloque os dois arquivos de licença da Tecnisys onde `TDP_LICENSE_PUBLIC_KEYS_FILE` e `TDP_LICENSE_FILE` apontam (por padrão `license/keys.json` e `license/lease.json`, ao lado do arquivo de variáveis) e rode:
 
 ```bash
 ./deploy.sh --install -v variables.env.local
@@ -111,17 +127,25 @@ O `variables.env.local` está no `.gitignore`. Ele é lido pelo bash (`source`),
 O que é executado, em ordem:
 
 1. `helm registry login` — autentica no registry OCI.
-2. `helm upgrade --install tdp-crds` — os CRDs do cluster; pulado quando os CRDs do ArgoCD já existem.
-3. `helm upgrade --install tdp-argo` — o ArgoCD em `ARGOCD_NAMESPACE`, com `application.namespaces: "*"`, para gerenciar Applications em qualquer namespace, e a interface exposta em `argo.${TDP_DOMAIN}` conforme `TDP_EXPOSE` (veja o Passo 4); aguarda o server e o application controller.
-4. `envsubst` em `common/` → `current/common/`. Os componentes são renderizados à parte, no Passo 6.
-5. `kubectl apply` de `current/common/` (criando o `TDP_NAMESPACE` se necessário):
+2. `helm upgrade --install tdp-crds` — os CRDs do cluster; pulado quando os CRDs do ArgoCD e os da licença já existem.
+3. A licença, em `TDP_LICENSE_NAMESPACE`: o pull secret `tdp-registry`, `helm upgrade --install tdp-license` (o tdp-license-operator e o webhook de admissão dele, confiando nas chaves públicas), o Secret `tecnisys-license-lease` e um par `LicensePolicy` + `PlatformLicense` para a plataforma inteira. Depois aguarda o operator verificar o lease e **para se a licença não estiver VALID**.
+4. `helm upgrade --install tdp-argo` — o ArgoCD em `ARGOCD_NAMESPACE`, com `application.namespaces: "*"`, para gerenciar Applications em qualquer namespace, e a interface exposta em `argo.${TDP_DOMAIN}` conforme `TDP_EXPOSE` (veja o Passo 4); aguarda o server e o application controller.
+5. `envsubst` em `common/` → `current/common/`. Os componentes são renderizados à parte, no Passo 6.
+6. `kubectl apply` de `current/common/` (criando o `TDP_NAMESPACE` se necessário):
    - `argo-gitops-appproject.yaml` — o AppProject da TDP
    - `tdp-devops-repo-secret.yaml` — credencial git para o ArgoCD
    - `tdp-registry-secret.yaml` — credencial do Helm OCI registry para o ArgoCD
    - `tdp-image-pull-secret.yaml` — o image pull secret `tdp-registry` em `TDP_NAMESPACE`. Um `tdp-registry` existente é mantido, a menos que se use `--force`.
    - `argo-gitops-app-of-apps.yaml` — o App of Apps
 
-> **Usando um ArgoCD instalado por você?** Pule o `--install` e rode `./deploy.sh -c -v variables.env.local`. Garanta que esse ArgoCD gerencie Applications em `TDP_PROJECT_NAMESPACE`:
+#### A trava de licença
+
+Todo chart da TDP (`tdp-argo`, `tdp-operator` e cada componente de `available/`) se recusa a instalar a menos que o `tdp-license-operator` esteja rodando e um `PlatformLicense` que o cubra esteja VALID (ou WARNING) e tenha sido verificado pelo operator nos últimos 10 minutos:
+
+- `helm install`/`upgrade` (como o `--install` faz com o `tdp-argo`) falha antes de criar qualquer coisa, com a mensagem `[<chart>] license check failed: …`.
+- O ArgoCD não consegue fazer essa verificação ao renderizar, então cada chart também renderiza um Job de hook PreSync `<release>-license-check` que a executa. Sem licença válida, o hook falha e o ArgoCD não aplica nada daquela Application; quando a licença volta a ficar VALID, o próximo sync passa.
+
+> **Usando um ArgoCD instalado por você?** Pule o `--install`: rode `./deploy.sh --license -v variables.env.local` para instalar a licença e depois `./deploy.sh -c -v variables.env.local`. Garanta que esse ArgoCD gerencie Applications em `TDP_PROJECT_NAMESPACE`:
 >
 > ```bash
 > kubectl patch configmap argocd-cm -n <namespace-do-argocd> --type merge \
@@ -129,6 +153,10 @@ O que é executado, em ordem:
 > kubectl rollout restart deployment argocd-server -n <namespace-do-argocd>
 > kubectl rollout restart statefulset argocd-application-controller -n <namespace-do-argocd>
 > ```
+
+#### Limite de nós de trabalho
+
+Uma licença também pode limitar quantos nós do Kubernetes podem executar a TDP. O operator conta os nós que executam pods com o label `tecnisys.com/licensed=true` nos `TDP_LICENSE_POLICY_NAMESPACES`. Quando há mais nós do que a licença permite por mais de 15 minutos, ele informa `UNDER_LICENSED`: `kubectl get platformlicense -A` mostra `NODES`, `MAX` e `CAPACITY`, e são gerados um evento `UnderLicensed` e a métrica `tecnisys_license_under_licensed`. É só um alerta: nada é parado ou recusado. Num cluster atualizado a partir de um kit mais antigo, o `deploy.sh` avisa quando o CRD `PlatformLicense` é antigo demais para informar isso, e mostra os comandos para atualizá-lo.
 
 ### Passo 4 — Expor a interface do ArgoCD
 
@@ -210,27 +238,28 @@ O ArgoCD pode sincronizar tudo de uma vez, mas componentes integrados pelo `valu
 
 | Ordem | Componentes | Observações |
 | --- | --- | --- |
-| 1. Armazenamento de objetos | `tdp-ozone` | Crie os buckets `warehouse` e `clickhouse-data` no volume `/s3v` do Ozone |
+| 1. Armazenamento de objetos | `tdp-ozone` | Crie os buckets `warehouse` e `clickhouse-data` no volume `/s3v` do Ozone (com a segurança do Ozone ligada, com a chave do `ozone-s3-credentials`: ver [Segurança do Ozone](#segurança-do-ozone)) |
 | 2. Metadados e engines | `tdp-hive-metastore`, `tdp-spark`, `tdp-iceberg`, `tdp-trino` | Usam o S3 Gateway do Ozone |
-| 3. Serviço e BI | `tdp-clickhouse`, `tdp-superset` | O Superset importa os datasources do ClickHouse e do Trino |
+| 3. Serviço e BI | `tdp-clickhouse`, `tdp-superset`, `tdp-hue` | O Superset importa os datasources do ClickHouse e do Trino; os editores do Hue consultam o Trino, o Spark SQL e o ClickHouse |
 | 4. Qualquer ordem | `tdp-airflow`, `tdp-kafka`, `tdp-nifi`, `tdp-jupyter` e os demais | Kafka e ClickHouse precisam do `tdp-operator` |
 
 ---
 
 ## Arquivos de values
 
-Cada Application aplica até três arquivos de values de `current/<componente>/`, nesta ordem — os posteriores prevalecem:
+Cada Application aplica até quatro arquivos de values de `current/<componente>/`, nesta ordem — os posteriores prevalecem:
 
 | Arquivo | Conteúdo | Na sincronização de release |
 | --- | --- | --- |
 | `values.yaml` | Padrões do chart (cópia do `values.yaml` do próprio chart) | Substituído pelos novos padrões do chart |
-| `values-gitops.yaml` | Padrões GitOps: correções específicas do ArgoCD (ex.: Jobs de migração do Airflow como hooks Sync), autenticação S3 do Ozone desligada enquanto o Kerberos estiver desligado, a ingress/storage class de `TDP_INGRESS_CLASS`/`TDP_STORAGE_CLASS`, a exposição de `TDP_EXPOSE`, espelhos de imagem em produção | Mantido |
-| `values-integration.yaml` | Integração com os outros componentes TDP em `TDP_NAMESPACE`: catálogos do Trino (hive, iceberg, clickhouse), Spark, Hive Metastore e ClickHouse no S3 do Ozone, datasources do Superset | Mantido |
+| `values-gitops.yaml` | Padrões GitOps: correções específicas do ArgoCD (ex.: Jobs de migração do Airflow como hooks Sync), autenticação S3 do Ozone desligada enquanto o Kerberos estiver desligado, a ingress/storage class de `TDP_INGRESS_CLASS`/`TDP_STORAGE_CLASS`, a exposição de `TDP_EXPOSE`, as senhas dos componentes de `TDP_*_PASSWORD`, espelhos de imagem em produção | Mantido |
+| `values-integration.yaml` | Integração com os outros componentes TDP em `TDP_NAMESPACE`: catálogos do Trino (hive, iceberg, clickhouse), Spark, Hive Metastore e ClickHouse no S3 do Ozone, datasources do Superset, editores do Hue | Mantido |
+| `values-ozone-security.yaml` | Só com `TDP_OZONE_SECURITY=true` (`tdp-ozone`, `tdp-trino`, `tdp-spark`, `tdp-hive-metastore`, `tdp-clickhouse`, `tdp-hue`): Kerberos e autenticação S3 no Ozone, e a chave S3 dos clientes a partir do `ozone-s3-credentials`. Ver [Segurança do Ozone](#segurança-do-ozone) | Mantido |
 
 - Maps são mesclados chave a chave, então um overlay só contém as chaves que muda. Listas e strings de várias linhas são substituídas por inteiro.
 - Uma `TDP_INGRESS_CLASS`/`TDP_STORAGE_CLASS` vazia é renderizada como `null`, o que remove a chave: vale o padrão do chart.
 - Os overlays são opcionais: apague um deles de `current/<componente>/` para não usá-lo (as Applications usam `ignoreMissingValueFiles: true`).
-- O `values-integration.yaml` supõe que os componentes referenciados estão instalados com os nomes padrão em `TDP_NAMESPACE`, e traz senhas de exemplo (`change-me-*`) que precisam ser trocadas, de forma consistente entre ClickHouse, Trino e Superset, antes de uso real.
+- O `values-integration.yaml` supõe que os componentes referenciados estão instalados com os nomes padrão em `TDP_NAMESPACE`, e pega as senhas de ClickHouse, Trino e Superset do `variables.env`.
 - O ArgoCD não substitui variáveis: tudo em `current/` precisa ser renderizado pelo `deploy.sh` antes de publicar.
 
 ### Customização de valores
@@ -247,6 +276,67 @@ git push origin main
 
 ---
 
+## Segurança do Ozone
+
+O `tdp-ozone` vem com a segurança desligada: não há Kerberos entre os seus daemons, e o S3 Gateway aceita qualquer chave, então qualquer cliente do cluster lê e grava em qualquer bucket. Os outros componentes usam chaves fictícias (`values-integration.yaml`). Esse é o padrão para o primeiro deploy; ligue a segurança para qualquer uso além de demonstração.
+
+### O que muda ao ligá-la
+
+- O `tdp-ozone` ganha o KDC interno do Ozone (realm `TDP.LOCAL`), Kerberos entre OM, SCM, datanodes, S3 Gateway e Recon, e autenticação S3 real.
+- Um Job PostSync pede ao OM uma chave S3, do admin do Ozone `tdp-s3-admin`, e a guarda no Secret `ozone-s3-credentials` em `TDP_NAMESPACE`. Todos os clientes abaixo usam essa chave, então todos agem como o admin do Ozone.
+- Cada cliente ganha um `values-ozone-security.yaml` que lê a chave desse Secret no lugar das chaves fictícias:
+
+| Componente | Como lê a chave |
+| --- | --- |
+| `tdp-trino` | env `AWS_*` no coordinator e nos workers; os catálogos `hive` e `iceberg` usam `${ENV:AWS_ACCESS_KEY_ID}` |
+| `tdp-spark` | env `AWS_*` no master, nos workers, no Thrift Server e no History Server; o `core-site.xml` usa `${env.AWS_ACCESS_KEY_ID}` |
+| `tdp-hive-metastore` | `metastore.s3.existingSecret` |
+| `tdp-clickhouse` | env `AWS_*` nos pods do servidor; o disco `ozone` usa `from_env` |
+| `tdp-hue` | Já lê o Secret; o overlay remove o valor fictício de reserva |
+
+- As interfaces web do OM, SCM, Recon e S3 Gateway continuam sem autenticação.
+- Drivers Spark que rodam fora dos pods do `tdp-spark` (Jupyter, Airflow) precisam eles mesmos de `AWS_ACCESS_KEY_ID` e `AWS_SECRET_ACCESS_KEY` desse Secret.
+- Não dá para desligá-la pelo kit: quando `current/` tem um `values-ozone-security.yaml`, o `deploy.sh` se recusa a renderizar com `TDP_OZONE_SECURITY=false`.
+
+### Como ligar
+
+Faça isso antes do primeiro sync do `tdp-ozone`. Ligar a segurança num Ozone que já guarda dados não foi testado; teste numa cópia antes.
+
+```bash
+./enable-ozone-security.sh -v variables.env.local
+git add current/ && git commit -m "feat: enable Ozone security" && git push
+```
+
+O script:
+
+1. Confere se o chart `tdp-ozone` em `HELM_CHART_VERSION` roda a exportação dos keytabs como hook Sync do ArgoCD: builds antigos nunca terminam o primeiro sync com a segurança ligada. Precisa de `helm` e acesso ao registry; `--skip-chart-check` pula a conferência.
+2. Pede confirmação (`-y` pula) e grava `TDP_OZONE_SECURITY=true` no seu arquivo de variáveis.
+3. Renderiza o `tdp-ozone` e os clientes acima que já estão em `current/` com `deploy.sh -p`, acrescentando o `values-ozone-security.yaml` deles e mantendo os outros arquivos de values. Componentes renderizados depois recebem o seu pelo `deploy.sh`.
+
+O `TDP_OZONE_KDC_MASTER_PASSWORD` é gerado na primeira renderização quando vazio, e mantido em `current/tdp-ozone/values-ozone-security.yaml`.
+
+### O que acontece no sync
+
+1. O `tdp-ozone` sincroniza o KDC (sync wave -2), um Job hook Sync que exporta os keytabs para Secrets (wave -1) e depois os daemons do Ozone. Em seguida um Job PostSync preenche o `ozone-s3-credentials`:
+
+   ```bash
+   kubectl -n <TDP_NAMESPACE> get secret ozone-s3-credentials -o jsonpath='{.data.aws_access_key_id}'
+   ```
+
+2. Pods dos clientes que sobem antes disso ficam em `CreateContainerConfigError` e sobem sozinhos quando ele é preenchido. Pods que já estavam rodando ficam com as chaves antigas: reinicie os Deployments e StatefulSets do `tdp-trino`, `tdp-spark`, `tdp-hive-metastore`, `tdp-clickhouse` e `tdp-hue` (**Restart** na interface do ArgoCD, ou `kubectl rollout restart`).
+3. Crie os buckets `warehouse` e `clickhouse-data` com essa chave, se ainda não existirem:
+
+   ```bash
+   NS=<TDP_NAMESPACE>
+   export AWS_ACCESS_KEY_ID=$(kubectl -n $NS get secret ozone-s3-credentials -o jsonpath='{.data.aws_access_key_id}' | base64 -d)
+   export AWS_SECRET_ACCESS_KEY=$(kubectl -n $NS get secret ozone-s3-credentials -o jsonpath='{.data.aws_secret_access_key}' | base64 -d)
+   kubectl -n $NS port-forward svc/tdp-ozone-s3g-rest 9878:9878 &
+   aws s3 mb s3://warehouse --endpoint-url http://localhost:9878 --region us-east-1
+   aws s3 mb s3://clickhouse-data --endpoint-url http://localhost:9878 --region us-east-1
+   ```
+
+---
+
 ## Operação no dia a dia
 
 | Tarefa | Como |
@@ -257,6 +347,7 @@ git push origin main
 | Adicionar um componente | Renderizá-lo (Passo 6), commitar e publicar |
 | Remover um componente | Apagar `current/<componente>/` e publicar: o ArgoCD remove a Application (prune) e executa os hooks de limpeza |
 | Trocar as credenciais do registry | Atualizar o `variables.env.local` e rodar `./deploy.sh -c -v variables.env.local --force` |
+| Renovar a licença | Substituir o arquivo para o qual `TDP_LICENSE_FILE` aponta (e o de `TDP_LICENSE_PUBLIC_KEYS_FILE`, se a Tecnisys enviar chaves novas) e rodar `./deploy.sh --license -v variables.env.local`. Workloads parados por licença expirada voltam sozinhos |
 
 Atualizar a versão dos charts:
 
@@ -294,7 +385,8 @@ Kits antigos commitavam `current/common/*-secret.yaml` e renderizavam Applicatio
 
 | Flag | Descrição |
 | --- | --- |
-| `--install` | **Primeira instalação**: helm login → tdp-crds → tdp-argo (exposto em `argo.${TDP_DOMAIN}` conforme `TDP_EXPOSE`) → aguarda ready → renderiza → aplica common |
+| `--install` | **Primeira instalação**: helm login → tdp-crds → licença (tdp-license-operator, lease, `PlatformLicense`; aguarda VALID) → tdp-argo (exposto em `argo.${TDP_DOMAIN}` conforme `TDP_EXPOSE`) → aguarda ready → renderiza → aplica common |
+| `--license` | Instala ou renova só a licença: tdp-crds (se faltar) → tdp-license-operator → lease → `PlatformLicense`, aguarda VALID e para |
 | `-v FILE` | Usar arquivo de variáveis customizado (padrão: `variables.env`) |
 | `-p` | Apenas renderizar → `current/` (sem aplicar) |
 | `-c` | Aplicar apenas recursos comuns (`current/common/`) via kubectl |
@@ -325,6 +417,9 @@ git add current/ && git commit -m "chore: render" && git push
 # Passar um componente já renderizado para Ingress (--force reescreve os arquivos de values)
 ./deploy.sh -p -v variables.env.local -e ingress --force tdp-trino
 
+# Ligar a segurança do Ozone (Kerberos + autenticação S3 real) e depois publicar
+./enable-ozone-security.sh -v variables.env.local
+
 # Re-aplicar apenas recursos comuns (AppProject, Secrets, App of Apps)
 ./deploy.sh -c -v variables.env.local
 
@@ -345,12 +440,13 @@ git add current/ && git commit -m "chore: render" && git push
 | `tdp-cloudbeaver` | CloudBeaver UI | |
 | `tdp-deltalake` | Delta Lake | |
 | `tdp-hive-metastore` | Hive Metastore | Integração: warehouse no S3 do Ozone |
+| `tdp-hue` | Hue SQL Editor | Inclui o próprio PostgreSQL; integração: editores do Trino, Spark SQL, ClickHouse e PostgreSQL, arquivos no S3 do Ozone |
 | `tdp-iceberg` | Apache Iceberg | |
 | `tdp-jupyter` | JupyterLab | |
 | `tdp-kafka` | Apache Kafka (Strimzi) | Precisa do `tdp-operator` |
 | `tdp-nifi` | Apache NiFi | |
 | `tdp-openmetadata` | OpenMetadata | |
-| `tdp-ozone` | Apache Ozone S3 | Vem com a segurança desligada (autenticação S3 desabilitada) |
+| `tdp-ozone` | Apache Ozone S3 | Vem com a segurança desligada (autenticação S3 desabilitada); ver [Segurança do Ozone](#segurança-do-ozone) |
 | `tdp-postgresql` | PostgreSQL | |
 | `tdp-ranger` | Apache Ranger | |
 | `tdp-spark` | Apache Spark | Integração: s3a no S3 do Ozone |
@@ -368,6 +464,9 @@ git add current/ && git commit -m "chore: render" && git push
 | `ImagePullBackOff` em uma imagem `tdp/` | Não existe o Secret `tdp-registry` em `TDP_NAMESPACE` | `./deploy.sh -c -v variables.env.local` |
 | Sync travado em `waiting for healthy state` | Um sync esperando pods que nunca ficam saudáveis não tem timeout, então novos commits ficam aguardando | Corrigir a causa e então usar Terminate na operação, na interface do ArgoCD; o auto-sync recomeça |
 | Application `OutOfSync` depois de um push | Ainda não foi atualizada | `kubectl annotate application <nome> -n <TDP_PROJECT_NAMESPACE> argocd.argoproj.io/refresh=hard --overwrite` |
+| `[tdp-argo] license check failed: …` no `--install`, ou no `helm install` de um chart da TDP | Sem `tdp-license-operator`, sem `PlatformLicense`, ou licença que não está VALID | Ler a mensagem, corrigir os arquivos de licença e rodar `./deploy.sh --license -v variables.env.local` |
+| `kubectl get platformlicense -A` mostra `CAPACITY UNDER_LICENSED` | Mais nós executam pods licenciados da TDP do que a licença permite, há mais de 15 minutos. É só um alerta: nada é parado | `kubectl get pods -A -l tecnisys.com/licensed=true -o wide` mostra onde eles rodam; reduzir os nós em que a TDP roda, ou pedir à Tecnisys uma licença com mais nós |
+| Sync de uma Application falha no hook PreSync `<release>-license-check` | O mesmo, para um componente sincronizado pelo ArgoCD | `kubectl -n <TDP_NAMESPACE> logs job/<release>-license-check`; quando `kubectl get platformlicense -A` mostrar VALID, sincronizar de novo |
 | Variáveis não substituídas (`${VAR}` no cluster) | Um template de `available/` ou `common/` foi aplicado diretamente | Sempre aplicar ou publicar `current/`, renderizado pelo `deploy.sh` |
 | Erros de autenticação no git ou no registry | Credenciais erradas, ou um `$` sem aspas no `variables.env.local` | Verificar `kubectl -n <ARGOCD_NAMESPACE> get secret tdp-devops-repo tdp-helm-oci-tdp`; rodar `./deploy.sh -c` de novo |
 
@@ -385,9 +484,9 @@ kubectl logs -n <ARGOCD_NAMESPACE> -l app.kubernetes.io/name=tdp-argocd-applicat
 
 ## Segurança
 
-- O `variables.env.local` e os `current/common/*-secret.yaml` renderizados estão no `.gitignore` — nunca commitar tokens ou senhas.
-- Vários `values.yaml` vêm com senhas de exemplo (ex.: `tdp-ranger`, `tdp-cloudbeaver`, `tdp-jupyter`, `tdp-airflow`), e o `values-integration.yaml` usa senhas `change-me-*` compartilhadas entre ClickHouse, Trino e Superset — são placeholders só para uso local/demo. **Troque antes de qualquer deploy real.**
-- O `values-integration.yaml` aponta para o S3 Gateway do Ozone com a segurança desligada: as chaves S3 ali não são credenciais reais, e qualquer cliente lê e grava. Habilite a segurança do Ozone (Kerberos) e secrets S3 reais para qualquer uso além de demonstração.
+- O `variables.env.local`, os `current/common/*-secret.yaml` renderizados e os arquivos de licença em `license/` estão no `.gitignore` — nunca commitar tokens ou senhas.
+- As senhas dos componentes têm `ChangeMe!T3c` como padrão (`TDP_DEFAULT_PASSWORD`), e o `deploy.sh` avisa enquanto alguma ainda o usa. **Defina-as antes de qualquer deploy real.** Os `current/<componente>/values*.yaml` renderizados guardam as senhas em texto puro e são commitados: mantenha o repositório GitOps privado.
+- O `values-integration.yaml` aponta para o S3 Gateway do Ozone com a segurança desligada: as chaves S3 ali não são credenciais reais, e qualquer cliente lê e grava. Ligue a [segurança do Ozone](#segurança-do-ozone) para qualquer uso além de demonstração.
 - Configure TLS em todos os Ingress, incluindo o da interface do ArgoCD.
 - Use uma conta robot somente de pull no registry, e troque os tokens do git e do registry regularmente.
 - O `TDP_PROJECT_NAMESPACE` deve ter RBAC restrito: Applications ali podem fazer deploy em qualquer lugar que o AppProject permita.

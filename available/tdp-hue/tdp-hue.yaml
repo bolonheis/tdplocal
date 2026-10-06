@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: tdp-ozone
+  name: tdp-hue
   namespace: ${TDP_PROJECT_NAMESPACE}
   labels:
     tecnisys.io/cluster: tdp
@@ -13,7 +13,7 @@ spec:
   sources:
   - repoURL: ${HELM_CHART_REPO_URL}
     targetRevision: ${HELM_CHART_VERSION}
-    chart: tdp-ozone
+    chart: tdp-hue
     helm:
       # values-gitops.yaml / values-integration.yaml are optional overlays:
       # delete one to opt out of it (missing files are skipped).
@@ -21,10 +21,10 @@ spec:
       # (enable-ozone-security.sh).
       ignoreMissingValueFiles: true
       valueFiles:
-      - $values/current/tdp-ozone/values.yaml
-      - $values/current/tdp-ozone/values-gitops.yaml
-      - $values/current/tdp-ozone/values-integration.yaml
-      - $values/current/tdp-ozone/values-ozone-security.yaml
+      - $values/current/tdp-hue/values.yaml
+      - $values/current/tdp-hue/values-gitops.yaml
+      - $values/current/tdp-hue/values-integration.yaml
+      - $values/current/tdp-hue/values-ozone-security.yaml
   
   - repoURL: '${GIT_REPO_URL}'
     targetRevision: main

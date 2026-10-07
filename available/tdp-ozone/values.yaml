@@ -317,6 +317,12 @@ tdp-ozone:
     # rejected. Only affects NEW buckets — a bucket's layout is fixed at
     # creation. Wired via s3g.env below (and in values-tdp-kerberos.yaml,
     # whose s3g.env list replaces this one).
+    # Directories are real too: an S3 DeleteObject(s) on "a/" deletes
+    # everything under a/. hadoop-aws before 3.4 deletes the parent "dir/"
+    # markers after creating a path, so every S3A client writing here must
+    # set fs.s3a.directory.marker.retention=keep, or creating one directory
+    # wipes its siblings' data. tdp-hive-metastore, tdp-spark, tdp-iceberg
+    # and tdp-deltalake set it; external S3A clients must too.
     defaultBucketLayout: FILE_SYSTEM_OPTIMIZED
     # Additional S3 Gateway environment variables (templated)
     env:

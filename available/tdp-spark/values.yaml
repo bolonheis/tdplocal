@@ -58,6 +58,12 @@ tdp-spark:
     # fs.s3a.secret.key: "<s3a-secret-key>"
     fs.s3a.path.style.access: "true"
     fs.s3a.impl: "org.apache.hadoop.fs.s3a.S3AFileSystem"
+    # Keep S3 "dir/" markers. hadoop-aws before 3.4 deletes
+    # the parent markers after creating a path, and on an Ozone
+    # FILE_SYSTEM_OPTIMIZED bucket (tdp-ozone's default) deleting "a/"
+    # deletes everything under a/.
+    # The image ships hadoop-aws 3.3.4 next to 3.4.1.
+    fs.s3a.directory.marker.retention: "keep"
     fs.s3a.connection.ssl.enabled: "false"
     fs.s3a.region: "us-east-1"
     fs.s3a.connection.maximum: "100"
@@ -134,6 +140,63 @@ tdp-spark:
 
   # Optional library dependencies (example used by some integration scenarios)
   extraLibraries: []
+
+  # Spark Thrift Server (HiveServer2-compatible JDBC/ODBC endpoint) —
+  # templates/thriftserver.yaml. Interactive Spark SQL for clients such as
+  # tdp-hue ("Spark SQL" interpreter, interface=hiveserver2) and beeline.
+  # Runs Spark's own HiveThriftServer2 from the same Spark image (no extra
+  # image), as a long-lived Spark application on this chart's standalone
+  # cluster: the driver lives in this pod, executors on the workers.
+  # Why not Livy: no released Livy supports Spark 4 / Scala 2.13 (0.9.0 ships
+  # only Scala 2.11/2.12 builds; Spark 4 support exists only on unreleased
+  # Livy master).
+  #
+  # Reuses the master's environment (spark.master.extraEnvVars — HOME, S3
+  # credentials from values-tdp-ozone-auth.yaml, ...), its extra volumes
+  # (Hadoop core-site) and the same spark-defaults.conf ConfigMap
+  # (customSparkConfig.configMapName), so S3/Iceberg/Delta settings apply
+  # to SQL sessions exactly as to batch jobs.
+  thriftServer:
+    enabled: true
+    # HiveServer2 binary-transport port (Hue: [spark] sql_server_port).
+    port: 10000
+    # hive.server2.authentication. NONE = SASL PLAIN, any user name accepted
+    # (no password check) — keep the Service cluster-internal.
+    authentication: NONE
+    # Embedded Derby metastore under /tmp (EmptyDir): table DEFINITIONS are
+    # lost on pod restart (data in S3 stays). Point hive.metastore.uris at a
+    # real Hive Metastore (e.g. tdp-hive-metastore) via extraHiveConf for a
+    # persistent catalog, or use the Iceberg overlay's catalog.
+    # Default database location — must be on storage the executors reach
+    # (S3), not the driver's local disk. The bucket must exist.
+    warehouseDir: "s3a://warehouse/spark-warehouse"
+    # S3A connector for the driver (embedded metastore, warehouse) and its
+    # executors. The base image keeps hadoop-aws out of jars/ — only the
+    # Iceberg/Delta overlays put it on the classpath (optional-jars/*). This
+    # matches the image's hadoop-client 3.4.1 (hadoop-aws 3.4.1 + AWS SDK v2
+    # bundle). Applied only when spark-defaults.conf
+    # (customSparkConfig.properties) sets no spark.driver.extraClassPath of
+    # its own, so values-iceberg.yaml / values-deltalake.yaml keep theirs.
+    s3aClassPath: "/opt/bitnami/spark/optional-jars/iceberg/hadoop-aws-3.4.1.jar:/opt/bitnami/spark/optional-jars/iceberg/aws-sdk-bundle-2.42.14.jar"
+    # The Thrift Server holds its executors for its whole lifetime — cap it
+    # so it doesn't take every worker core away from batch jobs.
+    sparkConf:
+      "spark.cores.max": "2"
+      "spark.executor.cores": "1"
+      "spark.executor.memory": "1g"
+      "spark.driver.memory": "1g"
+      # Fixed driver-side ports executors connect back to (pod IP).
+      "spark.driver.port": "7078"
+      "spark.blockManager.port": "7079"
+    # Extra --hiveconf entries (e.g. hive.metastore.uris).
+    extraHiveConf: {}
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1536Mi
+      limits:
+        cpu: 2
+        memory: 2Gi
 
   # Optional feature configuration blocks (kept in values.yaml as a single source of truth)
   deltaLake:
@@ -386,6 +449,10 @@ spark:
     # Secret loaded as env vars (e.g. AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY);
     # empty = spark.master.extraEnvVarsSecret, if set
     extraEnvVarsSecret: ""
+    # Extra env vars (Kubernetes EnvVar list, valueFrom included) for the History
+    # Server and its init container, e.g. single keys of a Secret whose key
+    # names differ from the env var names extraEnvVarsSecret would produce.
+    extraEnvVars: []
     service:
       type: ClusterIP
       port: 18080

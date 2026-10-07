@@ -97,6 +97,11 @@ maintenance:
       "spark.hadoop.fs.s3a.endpoint": "http://minio.minio.svc.cluster.local:9000"
       "spark.hadoop.fs.s3a.path.style.access": "true"
       "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"
+      # Keep S3 "dir/" markers. hadoop-aws before 3.4 deletes
+      # the parent markers after creating a path, and on an Ozone
+      # FILE_SYSTEM_OPTIMIZED bucket (tdp-ozone's default) deleting "a/"
+      # deletes everything under a/.
+      "spark.hadoop.fs.s3a.directory.marker.retention": "keep"
 
   # Scheduled maintenance jobs
   jobs:
@@ -111,6 +116,7 @@ maintenance:
           --conf spark.sql.catalog.iceberg.type=hive \
           --conf spark.sql.catalog.iceberg.uri=thrift://metastore.hive-metastore.svc.cluster.local:9083 \
           --conf spark.sql.catalog.iceberg.warehouse=s3a://warehouse/hive \
+          --conf spark.hadoop.fs.s3a.directory.marker.retention=keep \
           --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
           -e "CALL iceberg.system.expire_snapshots(older_than => TIMESTAMP '$(date -d '7 days ago' '+%Y-%m-%d %H:%M:%S')');"
 
@@ -125,6 +131,7 @@ maintenance:
           --conf spark.sql.catalog.iceberg.type=hive \
           --conf spark.sql.catalog.iceberg.uri=thrift://metastore.hive-metastore.svc.cluster.local:9083 \
           --conf spark.sql.catalog.iceberg.warehouse=s3a://warehouse/hive \
+          --conf spark.hadoop.fs.s3a.directory.marker.retention=keep \
           --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
           -e "CALL iceberg.system.remove_orphan_files(older_than => TIMESTAMP '$(date -d '3 days ago' '+%Y-%m-%d %H:%M:%S')');"
 
@@ -138,6 +145,7 @@ maintenance:
           --conf spark.sql.catalog.iceberg.type=hive \
           --conf spark.sql.catalog.iceberg.uri=thrift://metastore.hive-metastore.svc.cluster.local:9083 \
           --conf spark.sql.catalog.iceberg.warehouse=s3a://warehouse/hive \
+          --conf spark.hadoop.fs.s3a.directory.marker.retention=keep \
           --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
           -e "CALL iceberg.system.rewrite_data_files(table => 'iceberg.default.your_table_name');"
 

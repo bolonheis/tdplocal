@@ -12,7 +12,7 @@ spec:
 
   sources:
   - repoURL: registry.engtecnisys.com.br/tdp-dev/charts
-    targetRevision: 3.0.2-117.3
+    targetRevision: 3.0.2-117.4
     chart: tdp-postgresql
     helm:
       # values-gitops.yaml / values-integration.yaml are optional overlays:

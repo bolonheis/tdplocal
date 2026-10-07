@@ -9,6 +9,25 @@
 # filled yet when Hue starts, S3 stays hidden until Hue is restarted.
 
 tdp-hue:
+  # e2e test (branch 117), test only: Hue's legacy AWS account defaults to
+  # allow_environment_credentials=true, which makes its S3 connector use IAM
+  # (instance metadata, 169.254.169.254 — times out here) instead of the keys.
+  tdp:
+    extraIni: |
+      [hadoop]
+      [[hdfs_clusters]]
+      [[[default]]]
+      webhdfs_url=http://tdp-ozone-httpfs.tdp.svc.cluster.local:14000/webhdfs/v1
+
+      [spark]
+      sql_server_host=tdp-spark-thriftserver.tdp.svc.cluster.local
+
+      [aws]
+      [[aws_accounts]]
+      [[[default]]]
+      host=tdp-ozone-s3g-rest.tdp.svc.cluster.local:9878
+      allow_environment_credentials=false
+
   aws:
     accessKeyIdScript: "cat /etc/hue/secrets/s3-access-key-id 2>/dev/null || true"
     secretAccessKeyScript: "cat /etc/hue/secrets/s3-secret-access-key 2>/dev/null || true"

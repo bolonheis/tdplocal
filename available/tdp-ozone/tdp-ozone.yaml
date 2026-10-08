@@ -27,7 +27,7 @@ spec:
       - $values/current/tdp-ozone/values-ozone-security.yaml
   
   - repoURL: '${GIT_REPO_URL}'
-    targetRevision: main
+    targetRevision: test-124-ozone-security
     ref: values
 
   destination:

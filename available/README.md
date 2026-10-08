@@ -59,7 +59,6 @@ The components below are **cluster bootstrap dependencies**, not part of this `a
 
 - **tdp-jupyter** - JupyterHub notebooks
 - **tdp-superset** - Apache Superset visualization
-- **tdp-hue** - Hue SQL editor (Trino, Spark SQL, ClickHouse, PostgreSQL)
 - **tdp-trino** - Trino distributed SQL engine
 - **tdp-cloudbeaver** - CloudBeaver database manager
 

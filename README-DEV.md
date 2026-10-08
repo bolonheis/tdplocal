@@ -109,9 +109,8 @@ O `variables.env.local` está no `.gitignore`. Ele é lido pelo bash (`source`),
 | `TDP_LICENSE_NAMESPACE` | `tdp-system` | Onde ficam o `tdp-license-operator` e o `PlatformLicense` (padrão `tdp-system`) |
 | `TDP_LICENSE_POLICY_NAMESPACES` | `tdp,tdp-data` | Namespaces cujos workloads licenciados a licença controla, separados por vírgula (vazio = `TDP_NAMESPACE`) |
 | `TDP_DEFAULT_PASSWORD` | `'ChangeMe!T3c'` | Valor usado por todo `TDP_*_PASSWORD` vazio abaixo |
-| `TDP_<COMPONENTE>_..._PASSWORD` | vazio | Logins de admin das interfaces (Airflow, CloudBeaver, Jupyter, Kafka UI, Ranger, Superset) e os usuários de banco definidos nos values (PostgreSQL embutido do Airflow, Hive, Hue e Superset, Ranger, usuários `trino`/`superset` do ClickHouse); a lista está no `variables.env` |
+| `TDP_<COMPONENTE>_..._PASSWORD` | vazio | Logins de admin das interfaces (Airflow, CloudBeaver, Jupyter, Kafka UI, Ranger, Superset) e os usuários de banco definidos nos values (PostgreSQL embutido do Airflow, Hive e Superset, Ranger, usuários `trino`/`superset` do ClickHouse); a lista está no `variables.env` |
 | `TDP_SUPERSET_SECRET_KEY` | vazio | `SECRET_KEY` do Superset (assina as sessões e criptografa as senhas de conexão que o Superset guarda). Vazio: o `deploy.sh` mantém a chave já renderizada em `current/tdp-superset/`, ou gera uma na primeira renderização; copie-a para o seu arquivo de variáveis para fixá-la |
-| `TDP_HUE_SECRET_KEY` | vazio | Chave secreta do Hue (assina as sessões e os tokens CSRF). Mesmo tratamento do `TDP_SUPERSET_SECRET_KEY`; uma chave nova desconecta todos os usuários do Hue |
 | `TDP_OZONE_SECURITY` | `false` | Segurança do Ozone (Kerberos e autenticação S3 real). Gravado pelo `enable-ozone-security.sh`; ver [Segurança do Ozone](#segurança-do-ozone) |
 | `TDP_OZONE_KDC_MASTER_PASSWORD` | vazio | Senha mestra do KDC do Ozone, usada uma vez para criar o banco do KDC. Vazio: o `deploy.sh` mantém a que já está em `current/tdp-ozone/`, ou gera uma |
 
@@ -241,7 +240,7 @@ O ArgoCD pode sincronizar tudo de uma vez, mas componentes integrados pelo `valu
 | --- | --- | --- |
 | 1. Armazenamento de objetos | `tdp-ozone` | Crie os buckets `warehouse` e `clickhouse-data` no volume `/s3v` do Ozone (com a segurança do Ozone ligada, com a chave do `ozone-s3-credentials`: ver [Segurança do Ozone](#segurança-do-ozone)) |
 | 2. Metadados e engines | `tdp-hive-metastore`, `tdp-spark`, `tdp-iceberg`, `tdp-trino` | Usam o S3 Gateway do Ozone |
-| 3. Serviço e BI | `tdp-clickhouse`, `tdp-superset`, `tdp-hue` | O Superset importa os datasources do ClickHouse e do Trino; os editores do Hue consultam o Trino, o Spark SQL e o ClickHouse |
+| 3. Serviço e BI | `tdp-clickhouse`, `tdp-superset` | O Superset importa os datasources do ClickHouse e do Trino |
 | 4. Qualquer ordem | `tdp-airflow`, `tdp-kafka`, `tdp-nifi`, `tdp-jupyter` e os demais | Kafka e ClickHouse precisam do `tdp-operator` |
 
 ---
@@ -254,8 +253,8 @@ Cada Application aplica até quatro arquivos de values de `current/<componente>/
 | --- | --- | --- |
 | `values.yaml` | Padrões do chart (cópia do `values.yaml` do próprio chart) | Substituído pelos novos padrões do chart |
 | `values-gitops.yaml` | Padrões GitOps: correções específicas do ArgoCD (ex.: Jobs de migração do Airflow como hooks Sync), autenticação S3 do Ozone desligada enquanto o Kerberos estiver desligado, a ingress/storage class de `TDP_INGRESS_CLASS`/`TDP_STORAGE_CLASS`, a exposição de `TDP_EXPOSE`, as senhas dos componentes de `TDP_*_PASSWORD`, espelhos de imagem em produção | Mantido |
-| `values-integration.yaml` | Integração com os outros componentes TDP em `TDP_NAMESPACE`: catálogos do Trino (hive, iceberg, clickhouse), Spark, Hive Metastore e ClickHouse no S3 do Ozone, datasources do Superset, editores do Hue | Mantido |
-| `values-ozone-security.yaml` | Só com `TDP_OZONE_SECURITY=true` (`tdp-ozone`, `tdp-trino`, `tdp-spark`, `tdp-hive-metastore`, `tdp-clickhouse`, `tdp-hue`): Kerberos e autenticação S3 no Ozone, e a chave S3 dos clientes a partir do `ozone-s3-credentials`. Ver [Segurança do Ozone](#segurança-do-ozone) | Mantido |
+| `values-integration.yaml` | Integração com os outros componentes TDP em `TDP_NAMESPACE`: catálogos do Trino (hive, iceberg, clickhouse), Spark, Hive Metastore e ClickHouse no S3 do Ozone, datasources do Superset | Mantido |
+| `values-ozone-security.yaml` | Só com `TDP_OZONE_SECURITY=true` (`tdp-ozone`, `tdp-trino`, `tdp-spark`, `tdp-hive-metastore`, `tdp-clickhouse`): Kerberos e autenticação S3 no Ozone, e a chave S3 dos clientes a partir do `ozone-s3-credentials`. Ver [Segurança do Ozone](#segurança-do-ozone) | Mantido |
 
 - Maps são mesclados chave a chave, então um overlay só contém as chaves que muda. Listas e strings de várias linhas são substituídas por inteiro.
 - Uma `TDP_INGRESS_CLASS`/`TDP_STORAGE_CLASS` vazia é renderizada como `null`, o que remove a chave: vale o padrão do chart.
@@ -290,10 +289,9 @@ O `tdp-ozone` vem com a segurança desligada: não há Kerberos entre os seus da
 | Componente | Como lê a chave |
 | --- | --- |
 | `tdp-trino` | env `AWS_*` no coordinator e nos workers; os catálogos `hive` e `iceberg` usam `${ENV:AWS_ACCESS_KEY_ID}` |
-| `tdp-spark` | env `AWS_*` no master, nos workers, no Thrift Server e no History Server; o `core-site.xml` usa `${env.AWS_ACCESS_KEY_ID}` |
+| `tdp-spark` | env `AWS_*` no master, nos workers e no History Server; o `core-site.xml` usa `${env.AWS_ACCESS_KEY_ID}` |
 | `tdp-hive-metastore` | `metastore.s3.existingSecret` |
 | `tdp-clickhouse` | env `AWS_*` nos pods do servidor; o disco `ozone` usa `from_env` |
-| `tdp-hue` | Já lê o Secret; o overlay remove o valor fictício de reserva |
 
 - As interfaces web do OM, SCM, Recon e S3 Gateway continuam sem autenticação.
 - Drivers Spark que rodam fora dos pods do `tdp-spark` (Jupyter, Airflow) precisam eles mesmos de `AWS_ACCESS_KEY_ID` e `AWS_SECRET_ACCESS_KEY` desse Secret.
@@ -351,7 +349,7 @@ Isto apaga todos os objetos guardados no Ozone.
    kubectl -n <TDP_NAMESPACE> get secret ozone-s3-credentials -o jsonpath='{.data.aws_access_key_id}'
    ```
 
-2. Pods dos clientes que sobem antes disso ficam em `CreateContainerConfigError` e sobem sozinhos quando ele é preenchido. Pods que já estavam rodando ficam com as chaves antigas: reinicie os Deployments e StatefulSets do `tdp-trino`, `tdp-spark`, `tdp-hive-metastore`, `tdp-clickhouse` e `tdp-hue` (**Restart** na interface do ArgoCD, ou `kubectl rollout restart`).
+2. Pods dos clientes que sobem antes disso ficam em `CreateContainerConfigError` e sobem sozinhos quando ele é preenchido. Pods que já estavam rodando ficam com as chaves antigas: reinicie os Deployments e StatefulSets do `tdp-trino`, `tdp-spark`, `tdp-hive-metastore` e `tdp-clickhouse` (**Restart** na interface do ArgoCD, ou `kubectl rollout restart`).
 3. Crie os buckets `warehouse` e `clickhouse-data` com essa chave, se ainda não existirem:
 
    ```bash
@@ -468,7 +466,6 @@ git add current/ && git commit -m "chore: render" && git push
 | `tdp-cloudbeaver` | CloudBeaver UI | |
 | `tdp-deltalake` | Delta Lake | |
 | `tdp-hive-metastore` | Hive Metastore | Integração: warehouse no S3 do Ozone |
-| `tdp-hue` | Hue SQL Editor | Inclui o próprio PostgreSQL; integração: editores do Trino, Spark SQL, ClickHouse e PostgreSQL, arquivos no S3 do Ozone |
 | `tdp-iceberg` | Apache Iceberg | |
 | `tdp-jupyter` | JupyterLab | |
 | `tdp-kafka` | Apache Kafka (Strimzi) | Precisa do `tdp-operator` |

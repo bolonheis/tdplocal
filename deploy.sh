@@ -34,12 +34,12 @@ OPTIONAL_VARS=(TDP_DOMAIN TDP_INGRESS_CLASS TDP_STORAGE_CLASS
 # missing one falls back to TDP_DEFAULT_PASSWORD (see resolve_passwords).
 PASSWORD_VARS=(TDP_AIRFLOW_ADMIN_PASSWORD TDP_AIRFLOW_DB_PASSWORD
     TDP_CLICKHOUSE_TRINO_PASSWORD TDP_CLICKHOUSE_SUPERSET_PASSWORD
-    TDP_CLOUDBEAVER_ADMIN_PASSWORD TDP_HIVE_DB_PASSWORD TDP_HUE_DB_PASSWORD
-    TDP_JUPYTER_ADMIN_PASSWORD TDP_KAFKA_UI_ADMIN_PASSWORD TDP_RANGER_ADMIN_PASSWORD
-    TDP_RANGER_DB_PASSWORD TDP_SUPERSET_ADMIN_PASSWORD TDP_SUPERSET_DB_PASSWORD)
+    TDP_CLOUDBEAVER_ADMIN_PASSWORD TDP_HIVE_DB_PASSWORD TDP_JUPYTER_ADMIN_PASSWORD
+    TDP_KAFKA_UI_ADMIN_PASSWORD TDP_RANGER_ADMIN_PASSWORD TDP_RANGER_DB_PASSWORD
+    TDP_SUPERSET_ADMIN_PASSWORD TDP_SUPERSET_DB_PASSWORD)
 SHIPPED_DEFAULT_PASSWORD='ChangeMe!T3c'
 # Secret keys substituted in available/*/values*.yaml (see resolve_secret_key)
-SECRET_KEY_VARS=(TDP_SUPERSET_SECRET_KEY TDP_HUE_SECRET_KEY TDP_OZONE_KDC_MASTER_PASSWORD)
+SECRET_KEY_VARS=(TDP_SUPERSET_SECRET_KEY TDP_OZONE_KDC_MASTER_PASSWORD)
 
 # Function to print colored output
 print_info() {
@@ -582,10 +582,10 @@ resolve_passwords() {
 }
 
 # Function to fill in a component's secret key (Superset's SECRET_KEY signs the
-# session cookies and encrypts the database passwords Superset stores; Hue's
-# signs sessions and CSRF tokens), so it must stay the same across renders: the
-# variable wins, then the key already rendered in current/, and only then a new
-# random one.
+# session cookies and encrypts the database passwords Superset stores; the Ozone
+# KDC master password creates the KDC database), so it must stay the same across
+# renders: the variable wins, then the key already rendered in current/, and only
+# then a new random one.
 #   $1 variable  $2 component  $3 YAML key holding it  $4 what a new key does
 #   to an existing install (empty: no warning)  $5 values file holding it
 #   (default values-gitops.yaml)
@@ -1012,9 +1012,6 @@ main() {
     if [[ " ${selected_components[*]-} " == *" tdp-superset "* ]]; then
         resolve_secret_key TDP_SUPERSET_SECRET_KEY tdp-superset SUPERSET_SECRET_KEY \
             "makes the connection passwords an existing Superset stored unreadable"
-    fi
-    if [[ " ${selected_components[*]-} " == *" tdp-hue "* ]]; then
-        resolve_secret_key TDP_HUE_SECRET_KEY tdp-hue value "signs every Hue user out"
     fi
     if [ ${#selected_components[@]} -gt 0 ]; then
         check_ozone_security

@@ -470,7 +470,7 @@ tdp-ozone:
           # kubernetes.io/ingress.class: nginx
           # cert-manager.io/cluster-issuer: letsencrypt
         hosts:
-          - host: ozone-s3.${TDP_DOMAIN}
+          - host: ozone-s3.tdp.local
             paths:
               - path: /
                 pathType: Prefix
@@ -484,7 +484,7 @@ tdp-ozone:
         ingressClassName: ""
         annotations: {}
         hosts:
-          - host: ozone-s3-ui.${TDP_DOMAIN}
+          - host: ozone-s3-ui.tdp.local
             paths:
               - path: /
                 pathType: Prefix
@@ -495,7 +495,7 @@ tdp-ozone:
       ingressClassName: ""
       annotations: {}
       hosts:
-        - host: ozone-om.${TDP_DOMAIN}
+        - host: ozone-om.tdp.local
           paths:
             - path: /
               pathType: Prefix
@@ -506,7 +506,7 @@ tdp-ozone:
       ingressClassName: ""
       annotations: {}
       hosts:
-        - host: ozone-scm.${TDP_DOMAIN}
+        - host: ozone-scm.tdp.local
           paths:
             - path: /
               pathType: Prefix
@@ -517,7 +517,7 @@ tdp-ozone:
       ingressClassName: ""
       annotations: {}
       hosts:
-        - host: ozone-recon.${TDP_DOMAIN}
+        - host: ozone-recon.tdp.local
           paths:
             - path: /
               pathType: Prefix
@@ -542,7 +542,7 @@ tdp-ozone:
       rest:
         enabled: true
         hostnames:
-          - ozone-s3.${TDP_DOMAIN}
+          - ozone-s3.tdp.local
         rules:
           - matches:
               - path:
@@ -561,7 +561,7 @@ tdp-ozone:
       web:
         enabled: true
         hostnames:
-          - ozone-s3-ui.${TDP_DOMAIN}
+          - ozone-s3-ui.tdp.local
         rules:
           - matches:
               - path:
@@ -577,7 +577,7 @@ tdp-ozone:
     om:
       enabled: true
       hostnames:
-        - ozone-om.${TDP_DOMAIN}
+        - ozone-om.tdp.local
       rules:
         - matches:
             - path:
@@ -593,7 +593,7 @@ tdp-ozone:
     scm:
       enabled: true
       hostnames:
-        - ozone-scm.${TDP_DOMAIN}
+        - ozone-scm.tdp.local
       rules:
         - matches:
             - path:
@@ -609,7 +609,7 @@ tdp-ozone:
     recon:
       enabled: true
       hostnames:
-        - ozone-recon.${TDP_DOMAIN}
+        - ozone-recon.tdp.local
       rules:
         - matches:
             - path:

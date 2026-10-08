@@ -6,8 +6,8 @@
 #
 # It sets TDP_OZONE_SECURITY=true in the variables file and renders, with
 # deploy.sh -p, tdp-ozone and the components already in current/ that read
-# Ozone's S3 key (tdp-trino, tdp-spark, tdp-hive-metastore, tdp-clickhouse,
-# tdp-hue). Each gets its values-ozone-security.yaml; everything else in
+# Ozone's S3 key (tdp-trino, tdp-spark, tdp-hive-metastore, tdp-clickhouse).
+# Each gets its values-ozone-security.yaml; everything else in
 # current/ is kept. Nothing is applied: commit and push current/ afterwards.
 # Components rendered later get their overlay from deploy.sh.
 
@@ -22,7 +22,7 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CURRENT_DIR="${SCRIPT_DIR}/current"
 # Components with a values-ozone-security.yaml besides tdp-ozone
-S3_CLIENTS=(tdp-trino tdp-spark tdp-hive-metastore tdp-clickhouse tdp-hue)
+S3_CLIENTS=(tdp-trino tdp-spark tdp-hive-metastore tdp-clickhouse)
 
 VARIABLES_FILE=""
 ASSUME_YES=false
@@ -185,8 +185,8 @@ Next steps:
 3. Pods of the S3 clients that start before that wait in
    CreateContainerConfigError and start on their own once it is filled. Pods
    that were already running keep the old keys: restart the Deployments and
-   StatefulSets of tdp-trino, tdp-spark, tdp-hive-metastore, tdp-clickhouse and
-   tdp-hue (ArgoCD UI "Restart", or kubectl rollout restart).
+   StatefulSets of tdp-trino, tdp-spark, tdp-hive-metastore and tdp-clickhouse
+   (ArgoCD UI "Restart", or kubectl rollout restart).
 4. The buckets "warehouse" and "clickhouse-data" must exist in Ozone's /s3v
    volume. Create any missing one with the key from ozone-s3-credentials
    (README: "Ozone security").

@@ -134,14 +134,6 @@ tdp-ozone:
     env:
       - name: OZONE-SITE.XML_ozone.om.kerberos.keytab.file
         value: "{{ .Values.configuration.dir }}/security/keytabs/om.keytab"
-      # Lets the HttpFS gateway's principal (httpfs/httpfs@<realm> → short
-      # name "httpfs") impersonate end users. Gated by value, not by list
-      # presence (see env comment in values.yaml): empty = nobody may
-      # proxy, so this is inert unless httpfs.enabled is true.
-      - name: CORE-SITE.XML_hadoop.proxyuser.httpfs.hosts
-        value: '{{ if .Values.httpfs.enabled }}*{{ end }}'
-      - name: CORE-SITE.XML_hadoop.proxyuser.httpfs.groups
-        value: '{{ if .Values.httpfs.enabled }}*{{ end }}'
 
   scm:
     env:
@@ -161,10 +153,6 @@ tdp-ozone:
     env:
       - name: OZONE-SITE.XML_ozone.s3g.kerberos.keytab.file
         value: "{{ .Values.configuration.dir }}/security/keytabs/s3g.keytab"
-      # Repeated from values.yaml's s3g.env (this list replaces it) — see
-      # s3g.defaultBucketLayout there.
-      - name: OZONE-SITE.XML_ozone.s3g.default.bucket.layout
-        value: "{{ .Values.s3g.defaultBucketLayout }}"
 
   recon:
     env:

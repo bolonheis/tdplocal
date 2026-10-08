@@ -15,9 +15,8 @@
 
 tdp-spark:
   # core-site.xml: S3A keeps SimpleAWSCredentialsProvider (values.yaml) and
-  # Hadoop expands ${env.*} from the env vars below, in the master, worker,
-  # Thrift Server and History Server pods and in the executors the workers
-  # start. Unlike the chart overlay's EnvironmentVariableCredentialsProvider,
+  # Hadoop expands ${env.*} from the env vars below, in the master, worker
+  # and History Server pods and in the executors the workers start. Unlike the chart overlay's EnvironmentVariableCredentialsProvider,
   # this does not depend on the AWS SDK version on the classpath.
   hadoopConfig:
     fs.s3a.access.key: "${env.AWS_ACCESS_KEY_ID}"
@@ -25,7 +24,7 @@ tdp-spark:
 
 spark:
   # Lists replace the ones in values.yaml as a whole: values.yaml's entries
-  # are repeated, plus the two keys. The Thrift Server reuses the master's list.
+  # are repeated, plus the two keys.
   # tests/gitops/ozone-security/test.sh checks the repeated entries.
   master:
     extraEnvVars:

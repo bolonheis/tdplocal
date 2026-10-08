@@ -107,11 +107,6 @@ tdp-hive-metastore:
       existingSecretAccessKeyKey: access-key
       existingSecretSecretKeyKey: secret-key
       pathStyleAccess: true
-      # fs.s3a.directory.marker.retention: keep S3 "dir/" markers. hadoop-aws before 3.4 deletes
-      # the parent markers after creating a path, and on an Ozone
-      # FILE_SYSTEM_OPTIMIZED bucket (tdp-ozone's default) deleting "a/"
-      # deletes everything under a/.
-      directoryMarkerRetention: keep
       region: us-east-1
 
     # Thrift server worker threads.

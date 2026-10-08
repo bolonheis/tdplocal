@@ -19,7 +19,7 @@ spec:
       # applies them directly and they are git-ignored, so keep ArgoCD from
       # expecting (and pruning) them here.
       exclude: 'common/*-secret.yaml'
-    targetRevision: main
+    targetRevision: test-124-ozone-security
   destination:
     server: 'https://kubernetes.default.svc'
     namespace: ${TDP_NAMESPACE}

@@ -1,0 +1,117 @@
+# ==============================================================================
+# TDP (Tecnisys Data Platform) - Tecnisys
+# Helm chart values for PostgreSQL
+#
+# Usage:
+# - Edit this file to configure the chart.
+# - Prefer placeholders over real secrets; provide secrets via Kubernetes Secret
+#   or via Helm --set / external tooling.
+# - Keep a single source of truth: values.yaml.
+# - Environment-specific configurations: use values-{env}.yaml files.
+# ==============================================================================
+
+tdp-postgresql:
+
+  global:
+    compatibility:
+      openshift:
+        adaptSecurityContext: auto
+
+  # Labels applied to PostgreSQL resources. `commonLabels` lands on each
+  # resource's own metadata.labels (verified via `helm template`, not just
+  # pod labels), so it also carries the Tecnisys licensing opt-in
+  # (tecnisys.com/licensed, tecnisys.com/product). See
+  # stack/manifests/platform/tdp-platform-license.yaml (one shared whole-platform policy) — requires
+  # tdp-license-crds and tdp-license-operator to be installed. Remove the
+  # two tecnisys.com/* labels to opt this chart out of enforcement.
+  commonLabels:
+    tecnisys.io/cluster: tdp
+    tecnisys.com/licensed: "true"
+    tecnisys.com/product: tdp-postgresql
+
+  # Image used only in NOTES.txt examples (kubectl run ... psql).
+  client:
+    image: registry.tecnisys.com.br/community/images/bitnamilegacy/postgresql:17.5.0-debian-12-r20
+
+  # Dependency enablement
+  postgresql:
+    enabled: true
+
+  # PostgreSQL superuser password.
+  # For GitOps deployments, the auth-bootstrap-job creates the secret on first install
+  # to prevent password rotation on syncs. The chart is configured to use existingSecret.
+  auth:
+    existingSecret: tdp-postgresql-auth
+    secretKeys:
+      adminPasswordKey: postgres-password
+
+  primary:
+    # Persistent volume settings for the primary PostgreSQL instance.
+    persistence:
+      enabled: true
+      size: 1Gi
+
+    # Resource sizing for the primary PostgreSQL instance.
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "500m"
+      limits:
+        memory: "2Gi"
+        cpu: "1000m"
+
+    # Optional postgresql.conf overrides.
+    # If left empty, the upstream chart defaults will be used.
+    configuration: ""
+
+    # Example template (copy/paste into `configuration` when you need tuning, e.g. Hive Metastore):
+    #configuration: |-
+    #  listen_addresses = '*'
+    #  max_connections = 400
+    #  superuser_reserved_connections = 10
+    #  wal_level = 'replica'
+    #  fsync = 'on'
+    #  max_wal_size = '400MB'
+    #  max_wal_senders = '16'
+    #  wal_keep_size = '128MB'
+    #  hot_standby = 'on'
+    #  log_connections = 'false'
+    #  log_disconnections = 'false'
+    #  log_hostname = 'false'
+    #  client_min_messages = 'error'
+
+  # Service exposure.
+  service:
+    type: ClusterIP
+    port: 5432
+
+  # Startup probe is recommended to keep enabled for cluster health checks.
+  startupProbe:
+    enabled: true
+
+  # Enable the volume permissions init container.
+  volumePermissions:
+    enabled: false
+
+  # Prometheus metrics exporter.
+  metrics:
+    enabled: false
+
+# Install-time license gate (templates/tdp-license-check.yaml, the same file in
+# every TDP component chart). helm install/upgrade fails, and an ArgoCD sync
+# fails in its PreSync hook, unless tdp-license-operator is running and a
+# PlatformLicense covering this chart's product is VALID or WARNING. Install the
+# operator and the license first: scripts/tdp-license-install.sh (Helm) or
+# deploy.sh --install (GitOps kit).
+licenseCheck:
+  # Product the license must cover. Empty means the chart name; a PlatformLicense
+  # with spec.product "*" covers every chart.
+  product: ""
+  # How recently the operator must have verified the license, which proves it is
+  # still running (it re-verifies every 30s by default).
+  maxStatusAgeSeconds: 600
+  # Hook Job used when the chart is rendered without cluster access (ArgoCD):
+  # any image with bash, kubectl, grep and GNU date.
+  image: registry.tecnisys.com.br/community/images/bitnamilegacy/kubectl:latest
+  imagePullSecrets:
+    - name: tdp-registry

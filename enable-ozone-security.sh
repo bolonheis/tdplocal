@@ -51,8 +51,9 @@ Options:
   -h, --help              Show this help message
 
 Turning Ozone security on cannot be undone from the kit. Do it before tdp-ozone's
-first sync: turning it on for an Ozone that already stores data has not been
-tested. See "Ozone security" in README.md.
+first sync: an Ozone already running without security does not come back (its
+OM has no SCM-signed certificate) and must be reinstalled, losing its data. See
+"Ozone security" in README.md.
 EOF
 }
 
@@ -135,7 +136,7 @@ done
 if [ "$already_on" = "false" ]; then
     [ "$CHECK_CHART" = "true" ] && check_chart
     if [ -f "${CURRENT_DIR}/tdp-ozone/values.yaml" ]; then
-        print_warning "current/tdp-ozone already exists. If tdp-ozone is already deployed and stores data: turning security on for an existing Ozone has not been tested — try it on a copy first."
+        print_warning "current/tdp-ozone already exists. If tdp-ozone is already deployed, its OM will not start with security on (no SCM-signed certificate): it has to be reinstalled, which deletes its data (README: \"Reinstalling Ozone with security on\")."
     fi
     cat << EOF
 

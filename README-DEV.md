@@ -104,6 +104,7 @@ O `variables.env.local` está no `.gitignore`. Ele é lido pelo bash (`source`),
 | `TDP_INGRESS_CLASS`, `TDP_STORAGE_CLASS` | `nginx`, `local-path` | Gravadas em todos os `values-gitops.yaml`; vazio = padrão do chart e a classe padrão do cluster |
 | `TDP_EXPOSE` | `ingress` | Como os componentes com endpoint web são expostos: `ingress`, `gatewayapi` ou `none` (padrão; `-e` tem precedência) |
 | `TDP_GATEWAY_NAME`, `TDP_GATEWAY_NAMESPACE` | `tdp-gateway`, `gateway-system` | Com `gatewayapi`: o Gateway existente ao qual as HTTPRoutes se ligam (obrigatório) |
+| `TDP_OPENMETADATA_DATABASE` | `postgresql` | Banco de metadados do OpenMetadata: `mysql` (embutido, padrão) ou `postgresql` (o `tdp-postgresql` do kit, implantado antes). Define o `global.TDP-Settings.database` no `values-gitops.yaml` dele |
 | `TDP_LICENSE_PUBLIC_KEYS_FILE`, `TDP_LICENSE_FILE` | `license/keys.json`, `license/lease.json` | Os arquivos de licença da Tecnisys, relativos ao arquivo de variáveis. `license/` está no `.gitignore`. O lease também pode ser o manifesto do Secret `tecnisys-license-lease` |
 | `TDP_LICENSE_NAMESPACE` | `tdp-system` | Onde ficam o `tdp-license-operator` e o `PlatformLicense` (padrão `tdp-system`) |
 | `TDP_LICENSE_POLICY_NAMESPACES` | `tdp,tdp-data` | Namespaces cujos workloads licenciados a licença controla, separados por vírgula (vazio = `TDP_NAMESPACE`) |
@@ -300,7 +301,7 @@ O `tdp-ozone` vem com a segurança desligada: não há Kerberos entre os seus da
 
 ### Como ligar
 
-Faça isso antes do primeiro sync do `tdp-ozone`. Ligar a segurança num Ozone que já guarda dados não foi testado; teste numa cópia antes.
+Faça isso antes do primeiro sync do `tdp-ozone`. Não funciona num Ozone que já roda sem segurança: o OM dele foi inicializado sem um certificado assinado pelo SCM e fica em CrashLoopBackOff (`OzoneManager started in secure mode but doesn't have SCM signed certificate`). Para um Ozone que já guarda dados, copie os dados para fora e reinstale o Ozone com a segurança ligada (ver [Reinstalar o Ozone com a segurança ligada](#reinstalar-o-ozone-com-a-segurança-ligada)).
 
 ```bash
 ./enable-ozone-security.sh -v variables.env.local
@@ -314,6 +315,33 @@ O script:
 3. Renderiza o `tdp-ozone` e os clientes acima que já estão em `current/` com `deploy.sh -p`, acrescentando o `values-ozone-security.yaml` deles e mantendo os outros arquivos de values. Componentes renderizados depois recebem o seu pelo `deploy.sh`.
 
 O `TDP_OZONE_KDC_MASTER_PASSWORD` é gerado na primeira renderização quando vazio, e mantido em `current/tdp-ozone/values-ozone-security.yaml`.
+
+### Reinstalar o Ozone com a segurança ligada
+
+Isto apaga todos os objetos guardados no Ozone.
+
+1. Pause o App of Apps, para que ele não recrie o `tdp-ozone` enquanto você o apaga. Anote antes o `syncPolicy` dele:
+
+   ```bash
+   kubectl -n <ARGOCD_NAMESPACE> get application <TDP_APPLICATIONS> -o jsonpath='{.spec.syncPolicy}'
+   kubectl -n <ARGOCD_NAMESPACE> patch application <TDP_APPLICATIONS> --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'
+   ```
+
+2. Apague a Application `tdp-ozone` e os recursos dela. Um sync que espera por um OM que nunca fica pronto bloqueia a remoção: encerre-o antes (`argocd app terminate-op tdp-ozone`).
+
+   ```bash
+   kubectl -n <TDP_PROJECT_NAMESPACE> delete application tdp-ozone
+   ```
+
+3. Apague o que o ArgoCD não acompanha: os PVCs dos StatefulSets, os Secrets de keytab que o Job de exportação criou (um KDC novo precisa de keytabs novos, e o Job mantém os existentes) e as credenciais S3:
+
+   ```bash
+   kubectl -n <TDP_NAMESPACE> get pvc,secret | grep -E 'tdp-ozone|ozone-s3-credentials'
+   kubectl -n <TDP_NAMESPACE> delete pvc <os PVCs tdp-ozone-*>
+   kubectl -n <TDP_NAMESPACE> delete secret tdp-ozone-om-keytab tdp-ozone-scm-keytab tdp-ozone-dn-keytab tdp-ozone-s3g-keytab tdp-ozone-recon-keytab ozone-s3-credentials
+   ```
+
+4. Restaure o `syncPolicy` do App of Apps que você anotou no passo 1. O ArgoCD recria o `tdp-ozone` com a segurança ligada; siga com a próxima seção.
 
 ### O que acontece no sync
 

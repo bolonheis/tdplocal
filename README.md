@@ -104,6 +104,7 @@ cp variables.env variables.env.local
 | `TDP_INGRESS_CLASS`, `TDP_STORAGE_CLASS` | `nginx`, `local-path` | Written into every `values-gitops.yaml`; empty = chart default and the cluster's default class |
 | `TDP_EXPOSE` | `ingress` | How components with a web endpoint are exposed: `ingress`, `gatewayapi` or `none` (default; `-e` overrides it) |
 | `TDP_GATEWAY_NAME`, `TDP_GATEWAY_NAMESPACE` | `tdp-gateway`, `gateway-system` | With `gatewayapi`: the existing Gateway the HTTPRoutes attach to (required) |
+| `TDP_OPENMETADATA_DATABASE` | `postgresql` | OpenMetadata's metadata database: `mysql` (bundled, default) or `postgresql` (the kit's `tdp-postgresql`, deployed first). Sets `global.TDP-Settings.database` in its `values-gitops.yaml` |
 | `TDP_LICENSE_PUBLIC_KEYS_FILE`, `TDP_LICENSE_FILE` | `license/keys.json`, `license/lease.json` | The license files from Tecnisys, relative to the variables file. `license/` is git-ignored. The lease can also be the `tecnisys-license-lease` Secret manifest |
 | `TDP_LICENSE_NAMESPACE` | `tdp-system` | Where `tdp-license-operator` and the `PlatformLicense` live (default `tdp-system`) |
 | `TDP_LICENSE_POLICY_NAMESPACES` | `tdp,tdp-data` | Namespaces whose licensed workloads the license governs, comma-separated (empty = `TDP_NAMESPACE`) |
@@ -300,7 +301,7 @@ git push origin main
 
 ### Turning it on
 
-Do it before `tdp-ozone`'s first sync. Turning security on for an Ozone that already stores data has not been tested; try it on a copy first.
+Do it before `tdp-ozone`'s first sync. It does not work on an Ozone that already runs without security: its OM was initialized without an SCM-signed certificate and stays in CrashLoopBackOff (`OzoneManager started in secure mode but doesn't have SCM signed certificate`). For an Ozone that already holds data, copy the data out and reinstall Ozone with security on (see [Reinstalling Ozone with security on](#reinstalling-ozone-with-security-on)).
 
 ```bash
 ./enable-ozone-security.sh -v variables.env.local
@@ -314,6 +315,33 @@ The script:
 3. Renders `tdp-ozone` and the clients above that are already in `current/` with `deploy.sh -p`, adding their `values-ozone-security.yaml` and keeping the other values files. Components you render later get theirs from `deploy.sh`.
 
 `TDP_OZONE_KDC_MASTER_PASSWORD` is generated on the first render when empty, and kept in `current/tdp-ozone/values-ozone-security.yaml`.
+
+### Reinstalling Ozone with security on
+
+This deletes every object stored in Ozone.
+
+1. Pause the App of Apps, so it does not recreate `tdp-ozone` while you delete it. Note its `syncPolicy` first:
+
+   ```bash
+   kubectl -n <ARGOCD_NAMESPACE> get application <TDP_APPLICATIONS> -o jsonpath='{.spec.syncPolicy}'
+   kubectl -n <ARGOCD_NAMESPACE> patch application <TDP_APPLICATIONS> --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'
+   ```
+
+2. Delete the `tdp-ozone` Application and its resources. A sync that waits for an OM that never gets ready blocks the deletion: terminate it first (`argocd app terminate-op tdp-ozone`).
+
+   ```bash
+   kubectl -n <TDP_PROJECT_NAMESPACE> delete application tdp-ozone
+   ```
+
+3. Delete what ArgoCD does not track: the StatefulSet PVCs, the keytab Secrets the export Job created (a new KDC needs new keytabs, and the Job keeps existing ones) and the S3 credentials:
+
+   ```bash
+   kubectl -n <TDP_NAMESPACE> get pvc,secret | grep -E 'tdp-ozone|ozone-s3-credentials'
+   kubectl -n <TDP_NAMESPACE> delete pvc <the tdp-ozone-* PVCs>
+   kubectl -n <TDP_NAMESPACE> delete secret tdp-ozone-om-keytab tdp-ozone-scm-keytab tdp-ozone-dn-keytab tdp-ozone-s3g-keytab tdp-ozone-recon-keytab ozone-s3-credentials
+   ```
+
+4. Restore the App of Apps `syncPolicy` you noted in step 1. ArgoCD recreates `tdp-ozone` with security on; continue with the next section.
 
 ### What happens on the sync
 

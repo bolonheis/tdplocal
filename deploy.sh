@@ -27,7 +27,8 @@ FORCE_VALUES=false       # --force: overwrite existing current/<component>/value
 
 # Variables substituted in templates besides the ones declared in the variables file
 OPTIONAL_VARS=(TDP_DOMAIN TDP_INGRESS_CLASS TDP_STORAGE_CLASS
-    TDP_INGRESS_ENABLED TDP_GATEWAYAPI_ENABLED TDP_GATEWAY_NAME TDP_GATEWAY_NAMESPACE)
+    TDP_INGRESS_ENABLED TDP_GATEWAYAPI_ENABLED TDP_GATEWAY_NAME TDP_GATEWAY_NAMESPACE
+    TDP_OPENMETADATA_MYSQL_ENABLED TDP_OPENMETADATA_POSTGRESQL_ENABLED)
 
 # Component passwords substituted in available/*/values*.yaml. An empty or
 # missing one falls back to TDP_DEFAULT_PASSWORD (see resolve_passwords).
@@ -147,6 +148,18 @@ validate_variables_file() {
         exit 1
     fi
     print_info "Exposure: ${TDP_EXPOSE:-none}$([ "$TDP_GATEWAYAPI_ENABLED" = "true" ] && echo " (Gateway ${TDP_GATEWAY_NAMESPACE:+$TDP_GATEWAY_NAMESPACE/}${TDP_GATEWAY_NAME})")"
+
+    # OpenMetadata database: TDP_OPENMETADATA_DATABASE → the mutually exclusive
+    # global.TDP-Settings.database.{mysql,postgresql}.enabled switches in its values-gitops.yaml
+    case "$(echo "${TDP_OPENMETADATA_DATABASE:-mysql}" | tr '[:upper:]' '[:lower:]')" in
+        mysql|"")   TDP_OPENMETADATA_MYSQL_ENABLED=true;  TDP_OPENMETADATA_POSTGRESQL_ENABLED=false ;;
+        postgresql) TDP_OPENMETADATA_MYSQL_ENABLED=false; TDP_OPENMETADATA_POSTGRESQL_ENABLED=true ;;
+        *)
+            print_error "TDP_OPENMETADATA_DATABASE must be mysql or postgresql (got: ${TDP_OPENMETADATA_DATABASE})"
+            exit 1
+            ;;
+    esac
+    export TDP_OPENMETADATA_MYSQL_ENABLED TDP_OPENMETADATA_POSTGRESQL_ENABLED
 
     # Ozone security: TDP_OZONE_SECURITY=true renders the values-ozone-security.yaml
     # overlays (see enable-ozone-security.sh)

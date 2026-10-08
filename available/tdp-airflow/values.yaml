@@ -97,9 +97,23 @@ tdp-airflow:
     migrationsWaitTimeout: 300
 
   # Database migration job settings
+  # The database migration and admin-user Jobs run as regular resources, not
+  # Helm hooks (the upstream default). As post-install hooks they only start
+  # after `helm install --wait` (or an ArgoCD sync) sees every Deployment
+  # ready, while those Deployments wait in wait-for-airflow-migrations for
+  # the migrations to finish, so the install deadlocks until it times out.
+  # ttlSecondsAfterFinished must outlive the install: `helm install --wait-for-jobs`
+  # (and any CI waiting on the Jobs) reports a Job that the TTL already deleted as
+  # NotFound and never succeeds, and the pods can take several minutes to start
+  # after the migration finishes.
   migrateDatabaseJob:
     enabled: true
-    ttlSecondsAfterFinished: 300
+    useHelmHooks: false
+    ttlSecondsAfterFinished: 3600
+
+  createUserJob:
+    useHelmHooks: false
+    ttlSecondsAfterFinished: 3600
 
   # Private registry pull secret used by Airflow workloads.
   registry:
@@ -444,10 +458,13 @@ tdp-airflow:
       periodSeconds: 10
       scheme: HTTP
 
+    # Airflow 3's API server needs more than the 60s the upstream window allows
+    # to import its code on a CPU-limited pod; the probe killed it in a loop
+    # (exit 143, five restarts) before it came up. 30 x 10s allows five minutes.
     startupProbe:
       initialDelaySeconds: 0
       timeoutSeconds: 20
-      failureThreshold: 6
+      failureThreshold: 30
       periodSeconds: 10
       scheme: HTTP
 
@@ -478,6 +495,8 @@ tdp-airflow:
 
   # Triggerer
   triggerer:
+    livenessProbe:
+      timeoutSeconds: 60
     resources:
       requests:
         cpu: "512m"
@@ -492,6 +511,8 @@ tdp-airflow:
 
   # DAG Processor
   dagProcessor:
+    livenessProbe:
+      timeoutSeconds: 60
     resources:
       requests:
         cpu: "512m"

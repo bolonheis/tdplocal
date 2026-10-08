@@ -99,10 +99,11 @@ tdp-spark:
     properties: |
       # Ensure Ivy local repository uses an absolute, writable path
       spark.jars.ivy /tmp/.ivy2
-      # Keep event logs under /tmp which is mounted as an EmptyDir
-      spark.eventLog.enabled true
-      spark.eventLog.dir file:///tmp/spark-events
-      spark.history.fs.logDirectory file:///tmp/spark-events
+      # Event logs stay off unless spark.historyServer is enabled, which appends
+      # spark.eventLog.* for its own directory below these lines. A driver with
+      # event logs on refuses to start when the log directory does not exist,
+      # and nothing creates one in the Spark image.
+      spark.eventLog.enabled false
       # Reverse proxy to allow accessing workers/applications via Master Web UI
       spark.ui.reverseProxy true
       # Hadoop Security - Disable Kerberos (CRITICAL for simple auth)
@@ -115,10 +116,14 @@ tdp-spark:
       # Set Hadoop user to prevent null user errors
       spark.hadoop.hadoop.user.name spark
       spark.hadoop.hadoop.user.group spark
-      # Executor/driver sizing defaults
+      # Executor/driver sizing defaults. The executor must fit in what a worker
+      # offers: the standalone worker advertises its container memory minus 1 GiB
+      # (3 GiB with the 4Gi limit below) and, in that same container, the worker
+      # daemon takes about 1 GiB of heap. An executor asking for more (it was 4g)
+      # is never scheduled and the application waits forever.
       spark.executor.instances 2
       spark.executor.cores 2
-      spark.executor.memory 4g
+      spark.executor.memory 2g
       spark.driver.memory 2g
       spark.driver.cores 1
       # S3 Configuration
@@ -413,7 +418,7 @@ spark:
   # the vendored spark subchart has none). It reads the event logs the drivers
   # write, so both must see the same directory. While enabled, the chart appends
   # spark.eventLog.* for that directory to spark-defaults.conf, overriding the
-  # file:///tmp/spark-events lines in tdp-spark.customSparkConfig.properties.
+  # spark.eventLog.enabled false in tdp-spark.customSparkConfig.properties.
   historyServer:
     enabled: false
     eventLog:

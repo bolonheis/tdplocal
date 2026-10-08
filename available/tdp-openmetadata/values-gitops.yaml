@@ -8,6 +8,16 @@
 
 global:
   storageClass: ${TDP_STORAGE_CLASS}
+  # Metadata database (TDP_OPENMETADATA_DATABASE: mysql | postgresql). The two
+  # switches are mutually exclusive; deploy.sh sets them. postgresql uses the
+  # kit's tdp-postgresql (defaults in values.yaml: release tdp-postgresql in
+  # this namespace, admin Secret tdp-postgresql-auth).
+  TDP-Settings:
+    database:
+      mysql:
+        enabled: ${TDP_OPENMETADATA_MYSQL_ENABLED}
+      postgresql:
+        enabled: ${TDP_OPENMETADATA_POSTGRESQL_ENABLED}
 
 tdp-openmetadata:
   ingress:

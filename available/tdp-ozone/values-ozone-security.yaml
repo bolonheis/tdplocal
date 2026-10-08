@@ -131,6 +131,22 @@ tdp-ozone:
               path: security/keytabs/recon.keytab
 
   om:
+    # Turning security on for an Ozone that already ran without it: the OM's
+    # storage exists, so the image's entrypoint skips `ozone om --init`
+    # (ENSURE_OM_INITIALIZED), and the OM would stop with "OzoneManager started
+    # in secure mode but doesn't have SCM signed certificate". `ozone om --init`
+    # on an initialized OM keeps its data and only asks SCM for the
+    # certificate, so run it once, while VERSION has no omCertSerialId yet.
+    args:
+      - bash
+      - -c
+      - |
+        version="${ENSURE_OM_INITIALIZED:-/data/metadata/om/current/VERSION}"
+        if [ -f "$version" ] && ! grep -q '^omCertSerialId=' "$version"; then
+          echo "OM storage was initialized without security: getting its SCM-signed certificate"
+          /opt/hadoop/bin/ozone om --init
+        fi
+        exec /opt/hadoop/bin/ozone om
     env:
       - name: OZONE-SITE.XML_ozone.om.kerberos.keytab.file
         value: "{{ .Values.configuration.dir }}/security/keytabs/om.keytab"

@@ -299,7 +299,7 @@ O `tdp-ozone` vem com a segurança desligada: não há Kerberos entre os seus da
 
 ### Como ligar
 
-Faça isso antes do primeiro sync do `tdp-ozone`. Não funciona num Ozone que já roda sem segurança: o OM dele foi inicializado sem um certificado assinado pelo SCM e fica em CrashLoopBackOff (`OzoneManager started in secure mode but doesn't have SCM signed certificate`). Para um Ozone que já guarda dados, copie os dados para fora e reinstale o Ozone com a segurança ligada (ver [Reinstalar o Ozone com a segurança ligada](#reinstalar-o-ozone-com-a-segurança-ligada)).
+Funciona num `tdp-ozone` novo e num que já roda sem segurança, mantendo os dados: no primeiro start com a segurança ligada, o OM obtém o certificado assinado pelo SCM com que não foi inicializado (`ozone om --init`, executado pelo `values-ozone-security.yaml`). Faça backup do que não pode perder antes, como em qualquer mudança desse porte.
 
 ```bash
 ./enable-ozone-security.sh -v variables.env.local
@@ -314,36 +314,9 @@ O script:
 
 O `TDP_OZONE_KDC_MASTER_PASSWORD` é gerado na primeira renderização quando vazio, e mantido em `current/tdp-ozone/values-ozone-security.yaml`.
 
-### Reinstalar o Ozone com a segurança ligada
-
-Isto apaga todos os objetos guardados no Ozone.
-
-1. Pause o App of Apps, para que ele não recrie o `tdp-ozone` enquanto você o apaga. Anote antes o `syncPolicy` dele:
-
-   ```bash
-   kubectl -n <ARGOCD_NAMESPACE> get application <TDP_APPLICATIONS> -o jsonpath='{.spec.syncPolicy}'
-   kubectl -n <ARGOCD_NAMESPACE> patch application <TDP_APPLICATIONS> --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'
-   ```
-
-2. Apague a Application `tdp-ozone` e os recursos dela. Um sync que espera por um OM que nunca fica pronto bloqueia a remoção: encerre-o antes (`argocd app terminate-op tdp-ozone`).
-
-   ```bash
-   kubectl -n <TDP_PROJECT_NAMESPACE> delete application tdp-ozone
-   ```
-
-3. Apague o que o ArgoCD não acompanha: os PVCs dos StatefulSets, os Secrets de keytab que o Job de exportação criou (um KDC novo precisa de keytabs novos, e o Job mantém os existentes) e as credenciais S3:
-
-   ```bash
-   kubectl -n <TDP_NAMESPACE> get pvc,secret | grep -E 'tdp-ozone|ozone-s3-credentials'
-   kubectl -n <TDP_NAMESPACE> delete pvc <os PVCs tdp-ozone-*>
-   kubectl -n <TDP_NAMESPACE> delete secret tdp-ozone-om-keytab tdp-ozone-scm-keytab tdp-ozone-dn-keytab tdp-ozone-s3g-keytab tdp-ozone-recon-keytab ozone-s3-credentials
-   ```
-
-4. Restaure o `syncPolicy` do App of Apps que você anotou no passo 1. O ArgoCD recria o `tdp-ozone` com a segurança ligada; siga com a próxima seção.
-
 ### O que acontece no sync
 
-1. O `tdp-ozone` sincroniza o KDC (sync wave -2), um Job hook Sync que exporta os keytabs para Secrets (wave -1) e depois os daemons do Ozone. Em seguida um Job PostSync preenche o `ozone-s3-credentials`:
+1. O `tdp-ozone` sincroniza o KDC (sync wave -2), um Job hook Sync que exporta os keytabs para Secrets (wave -1) e depois os daemons do Ozone. Num Ozone que já roda, eles reiniciam um a um com Kerberos, e o OM obtém o certificado ao subir. Em seguida um Job PostSync preenche o `ozone-s3-credentials`:
 
    ```bash
    kubectl -n <TDP_NAMESPACE> get secret ozone-s3-credentials -o jsonpath='{.data.aws_access_key_id}'

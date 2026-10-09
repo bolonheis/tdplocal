@@ -1,0 +1,310 @@
+# ==============================================================================
+# TDP (Tecnisys Data Platform) - Tecnisys
+# Helm chart values for Apache Ozone
+#
+# Usage:
+# - Edit this file to configure the chart.
+# - Prefer placeholders over real secrets; provide secrets via Kubernetes Secret
+#   or via Helm --set / external tooling.
+# - Keep a single source of truth: values.yaml.
+# - Environment-specific configurations: use values-{env}.yaml files.
+
+tdp-clickhouse:
+  commonLabels:
+    tecnisys.io/cluster: tdp
+
+  clickhouse:
+    enabled: true
+    podLabels:
+      tecnisys.io/cluster: tdp
+
+    # Storage configuration
+    image:
+      repository: registry.tecnisys.com.br/community/images/clickhouse/clickhouse-server
+      tag: "25.8.11.66"
+    service:
+      serviceLabels:
+        tecnisys.io/cluster: tdp
+    lbService:
+      serviceLabels:
+        tecnisys.io/cluster: tdp
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClass: "" # default storage class
+      accessModes: ["ReadWriteOnce"]
+
+    # Resource requests and limits
+    resources:
+      requests:
+        memory: "2Gi"
+        cpu: "1"
+      limits:
+        memory: "4Gi"
+        cpu: "2"
+
+    # Default user configuration
+    defaultUser:
+      # Do not store real credentials in this repository.
+      # Set a strong password via a private override values file when needed.
+      password: ""
+
+    # ClickHouse server logging level
+    configuration:
+      logging:
+        level: INFO
+
+    # TDP user configuration (optional)
+    # When enabled, this chart creates a Secret `tdp-clickhouse-tdp-user` and runs a post-install/upgrade Job
+    # to apply grants. This is intended for platform integrations.
+    tdpUser:
+      enabled: false
+      password: ""
+
+    # LDAP role initialization (optional)
+    # Uncomment to auto-create the LDAP role (no database/grants are created).
+    # ldapRoleInit:
+    #   enabled: true
+    #   role: tdp_ldap_role
+
+    # Additional configuration for ClickHouse 25.x+
+    extraUsers: |
+      <yandex>
+        <profiles>
+          <default>
+            <query_cache_system_table_handling>ignore</query_cache_system_table_handling>
+          </default>
+        </profiles>
+      </yandex>
+
+    # LDAP configuration (optional) - uncomment to enable
+    # extraConfig: |
+    #   <yandex>
+    #     <user_directories>
+    #       <ldap>
+    #         <server>tdp_ldap</server>
+    #         <roles>
+    #           <tdp_ldap_role />
+    #         </roles>
+    #       </ldap>
+    #       <local_directory>
+    #         <path>/var/lib/clickhouse/access/</path>
+    #       </local_directory>
+    #       <users_xml>
+    #         <path>users.xml</path>
+    #       </users_xml>
+    #     </user_directories>
+    #     <ldap_servers>
+    #       <tdp_ldap>
+    #         <host><LDAP_HOST></host>
+    #         <port>389</port>
+    #         <auth_dn_prefix>uid=</auth_dn_prefix>
+    #         <auth_dn_suffix>,cn=users,cn=accounts,dc=example,dc=com</auth_dn_suffix>
+    #         <base_dn><BASE_DN></base_dn>
+    #         <user_filter>(uid={user})</user_filter>
+    #         <enable_tls>0</enable_tls>
+    #       </tdp_ldap>
+    #     </ldap_servers>
+    #   </yandex>
+
+    # ===========================================================================
+    # Optional configurations (examples)
+    # ===========================================================================
+
+    # S3 storage policy (example)
+    # Notes:
+    # - Keep values synchronized with `TDPConfigurations.s3Connection`.
+    # - Do not commit real access keys.
+    # podTemplate:
+    #   spec:
+    #     hostAliases:
+    #       - ip: "<IP_ADDRESS>"
+    #         hostnames:
+    #           - <HOSTNAME>
+    # extraConfig: |
+    #   <yandex>
+    #     <storage_configuration>
+    #       <disks>
+    #         <default>
+    #           <keep_free_space_bytes>1073741824</keep_free_space_bytes>
+    #         </default>
+    #         <s3>
+    #           <type>s3</type>
+    #           <endpoint>https://<HOSTNAME>/clickhouse-data/</endpoint>
+    #           <access_key_id><S3_ACCESS_KEY></access_key_id>
+    #           <secret_access_key><S3_SECRET_KEY></secret_access_key>
+    #           <use_https>1</use_https>
+    #           <skip_hostname_verification_for_https>1</skip_hostname_verification_for_https>
+    #           <bucket>clickhouse-data</bucket>
+    #           <path>data/</path>
+    #           <use_environment_credentials>false</use_environment_credentials>
+    #           <path_style>true</path_style>
+    #         </s3>
+    #       </disks>
+    #       <policies>
+    #         <default>
+    #           <volumes>
+    #             <main>
+    #               <disk>default</disk>
+    #             </main>
+    #           </volumes>
+    #         </default>
+    #         <s3>
+    #           <volumes>
+    #             <main>
+    #               <disk>s3</disk>
+    #             </main>
+    #           </volumes>
+    #         </s3>
+    #       </policies>
+    #     </storage_configuration>
+    #     <openSSL>
+    #       <client>
+    #         <loadDefaultCAFile>false</loadDefaultCAFile>
+    #         <verificationMode>none</verificationMode>
+    #         <invalidCertificateHandler>
+    #           <name>AcceptCertificateHandler</name>
+    #         </invalidCertificateHandler>
+    #       </client>
+    #     </openSSL>
+    #   </yandex>
+
+    # Portworx storage example
+    # persistence:
+    #   enabled: true
+    #   size: 10Gi
+    #   storageClass: "px-db"
+    #   accessModes: ["ReadWriteOnce"]
+    #   annotations:
+    #     portworx.io/repl: "3"
+    #     portworx.io/io_priority: "high"
+    #     portworx.io/snapshot: "true"
+    #     portworx.io/block_size: "64"
+
+    # High availability (HA) example (shards/replicas)
+    # shardsCount: 2
+    # replicasCount: 2
+    # antiAffinity: false
+    # configuration:
+    #   clusters:
+    #     - name: tdp-clickhouse
+    #       layout:
+    #         shardsCount: 2
+    #         replicasCount: 2
+    #   settings:
+    #     distributed_ddl:
+    #       enable: true
+    #   macros:
+    #     cluster: tdp-clickhouse
+    #     shard: '{shard}'
+    #     replica: '{replica}'
+
+  # Disabled by default: the Altinity Operator is now a single, cluster-wide
+  # shared instance installed once via `tdp-operator`
+  # (stack/charts/tdp/tdp-operator) — see that chart's README for why.
+  # Bundling one operator copy per tdp-clickhouse release (one per
+  # namespace/cluster, the normal TDP layout) meant N cluster-wide-RBAC,
+  # watch-all-namespaces operators ran concurrently and fought over the
+  # same ClickHouseInstallation CRs — an operator started in namespace A
+  # could mutate a cluster that actually belonged to namespace B.
+  #
+  # Only flip this to true for a standalone install with no `tdp-operator`
+  # anywhere else in the cluster (single ClickHouse cluster, no other
+  # tdp-clickhouse release). See tdp-operator/values.yaml for the
+  # equivalent image/logger/label configuration, now applied there instead.
+  operator:
+    enabled: false
+
+  # ClickHouse Keeper (optional)
+  # Enable this for HA/distributed clusters that require coordination.
+  # keeper:
+  #   enabled: true
+  #   replicaCount: 1
+  #   image: registry.tecnisys.com.br/community/images/clickhouse/clickhouse-keeper
+  #   tag: "25.8.11.66"
+  #   localStorage:
+  #     size: 5Gi
+  #     storageClass: ""
+
+  # Cleanup configuration
+  cleanup:
+    enabled: true
+    image:
+      repository: registry.tecnisys.com.br/community/images/bitnamilegacy/kubectl
+      tag: latest
+      pullPolicy: IfNotPresent
+
+# Configurations for TDP-specific connections and integrations (optional)
+TDP-Settings:
+  # S3-compatible integration used by the pre-install bucket job (e.g. MinIO).
+  # When enabled, the chart will attempt to create the bucket if it does not exist.
+  s3Connection:
+    enabled: false
+    bucket: ""
+    accessKey: ""
+    secretKey: ""
+    uri: ""
+    selfSigned: false
+  # Gateway configuration controls which network exposure method is used
+  gateway:
+    # Enable Kubernetes Ingress resources for ClickHouse
+    # When true, Ingress resources will be created based on the 'ingress' section above
+    ingress:
+      enabled: false
+    # Enable Kubernetes Gateway API resources for ClickHouse
+    # When true, HTTPRoute resources will be created based on the 'gatewayApi' section above
+    # Note: Gateway API and Ingress are mutually exclusive - only one should be enabled
+    gatewayApi:
+      enabled: false
+
+# Gateway API configuration for exposing ClickHouse HTTP UI
+# Used when TDP-Settings.gateway.gatewayApi.enabled is true
+gatewayApi:
+  # Gateway reference - the Gateway resource to attach HTTPRoutes to
+  gatewayClassName: ""
+  parentRefs: []
+  clickhouse:
+    enabled: true
+    hostnames:
+      - clickhouse.tdp.local
+    rules:
+      - matches:
+          - path:
+              type: PathPrefix
+              value: /
+        backendRefs:
+          - name: ""
+            port: 8123
+    tls:
+      certificateRefs: []
+
+# Ingress configuration for exposing ClickHouse HTTP UI
+# Used when TDP-Settings.gateway.ingress.enabled is true
+ingress:
+  ingressClassName: ""
+  annotations: {}
+  hosts:
+    - host: clickhouse.tdp.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Install-time license gate (templates/tdp-license-check.yaml, the same file in
+# every TDP component chart). helm install/upgrade fails, and an ArgoCD sync
+# fails in its PreSync hook, unless tdp-license-operator is running and a
+# PlatformLicense covering this chart's product is VALID or WARNING. Install the
+# operator and the license first: scripts/tdp-license-install.sh (Helm) or
+# deploy.sh --install (GitOps kit).
+licenseCheck:
+  # Product the license must cover. Empty means the chart name; a PlatformLicense
+  # with spec.product "*" covers every chart.
+  product: ""
+  # How recently the operator must have verified the license, which proves it is
+  # still running (it re-verifies every 30s by default).
+  maxStatusAgeSeconds: 600
+  # Hook Job used when the chart is rendered without cluster access (ArgoCD):
+  # any image with bash, kubectl, grep and GNU date.
+  image: registry.tecnisys.com.br/community/images/bitnamilegacy/kubectl:latest
+  imagePullSecrets:
+    - name: tdp-registry

@@ -1,0 +1,219 @@
+# TDP Iceberg Maintenance Configuration
+# This chart provides Iceberg table maintenance utilities and scheduled jobs
+
+# Global configuration
+global:
+  storageClass: "standard"
+  # Pull secret for registry.tecnisys.com.br/tdp/images/* (private): a
+  # kubernetes.io/dockerconfigjson Secret in the release namespace. Used by the
+  # Spark subchart's master/worker and by this chart's maintenance CronJobs.
+  imagePullSecrets:
+    - tdp-registry
+  security:
+    allowInsecureImages: true
+  compatibility:
+    openshift:
+      adaptSecurityContext: force
+
+# Spark dependency (subchart)
+# The upstream Spark chart is configured under `spark.*`.
+# IMPORTANT: This controls the Spark master/worker Pods created by the dependency.
+# If `spark.image.*` is not set, the upstream defaults to docker.io/bitnamilegacy/spark.
+spark:
+  # `commonLabels` is the vendored spark chart's chart-wide label hook. It
+  # lands on every resource's own metadata.labels (verified via `helm
+  # template`), unlike master.podLabels/worker.podLabels below, which only
+  # reach the pod template. This is where the Tecnisys licensing opt-in
+  # (tecnisys.com/licensed, tecnisys.com/product) is applied — see
+  # stack/manifests/platform/tdp-platform-license.yaml (one shared whole-platform policy) — requires
+  # tdp-license-crds and tdp-license-operator to be installed. Remove the
+  # two tecnisys.com/* labels to opt this chart out of enforcement.
+  #
+  # SCOPE NOTE: this only labels the Spark master/worker StatefulSets
+  # rendered by the vendored dependency (enabled via
+  # maintenance.spark.enabled below). The maintenance CronJobs this
+  # chart's own templates render (templates/cronjob-maintenance.yaml) use
+  # a hardcoded label helper with no values-driven extension point, so
+  # they CANNOT be labeled from values.yaml alone — see the license
+  # manifest for details.
+  commonLabels:
+    tecnisys.io/cluster: "tdp"
+    tecnisys.com/licensed: "true"
+    tecnisys.com/product: tdp-iceberg
+  image:
+    # Host and project in one string on purpose: the release pipeline rewrites
+    # registry.tecnisys.com.br/tdp/... to registry.tecnisys.com.br/tdp/...
+    # only when both appear together (a split registry:/repository: kept
+    # "tdp-dev" in production refs). Empty registry = no prefix.
+    registry: ""
+    repository: registry.tecnisys.com.br/tdp/images/spark
+    tag: 4.0.2-2
+    pullPolicy: IfNotPresent
+  master:
+    podLabels:
+      tecnisys.io/cluster: "tdp"
+  worker:
+    podLabels:
+      tecnisys.io/cluster: "tdp"
+
+# Maintenance configuration
+maintenance:
+  # Enable/disable maintenance jobs
+  enabled: true
+
+  # Spark-based maintenance jobs
+  spark:
+    enabled: true
+
+    # CronJob container image (used by this chart's maintenance jobs).
+    # NOTE: This is independent from `spark.image.*` (Spark subchart).
+    image:
+      repository: "registry.tecnisys.com.br/tdp/images/spark"
+      tag: "4.0.2-2"
+      pullPolicy: IfNotPresent
+    # Extra pull secrets for the maintenance CronJobs only (global.imagePullSecrets
+    # above already applies to them). Names or {name: ...} maps.
+    imagePullSecrets: []
+
+    # Resource allocation for maintenance jobs
+    resources:
+      requests:
+        cpu: 1
+        memory: 2Gi
+      limits:
+        cpu: 2
+        memory: 4Gi
+
+    # Spark configuration for maintenance
+    config:
+      "spark.sql.catalog.iceberg": "org.apache.iceberg.spark.SparkCatalog"
+      "spark.sql.catalog.iceberg.type": "hive"
+      "spark.sql.catalog.iceberg.uri": "thrift://metastore.hive-metastore.svc.cluster.local:9083"
+      "spark.sql.catalog.iceberg.warehouse": "s3a://warehouse/hive"
+      "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+
+      # S3A endpoint for MinIO/S3.
+      # Required Secret: `s3-credentials` with keys `access-key` and `secret-key`.
+      "spark.hadoop.fs.s3a.endpoint": "http://minio.minio.svc.cluster.local:9000"
+      "spark.hadoop.fs.s3a.path.style.access": "true"
+      "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"
+
+  # Scheduled maintenance jobs
+  jobs:
+    # Expire old snapshots
+    expireSnapshots:
+      enabled: true
+      schedule: "0 2 * * *"  # Daily at 2 AM
+      retentionDays: 7
+      command: |
+        spark-sql --packages org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.0,org.apache.hadoop:hadoop-aws:3.3.4 \
+          --conf spark.sql.catalog.iceberg=org.apache.iceberg.spark.SparkCatalog \
+          --conf spark.sql.catalog.iceberg.type=hive \
+          --conf spark.sql.catalog.iceberg.uri=thrift://metastore.hive-metastore.svc.cluster.local:9083 \
+          --conf spark.sql.catalog.iceberg.warehouse=s3a://warehouse/hive \
+          --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+          -e "CALL iceberg.system.expire_snapshots(older_than => TIMESTAMP '$(date -d '7 days ago' '+%Y-%m-%d %H:%M:%S')');"
+
+    # Remove orphan files
+    removeOrphanFiles:
+      enabled: true
+      schedule: "0 3 * * 0"  # Weekly on Sunday at 3 AM
+      olderThanDays: 3
+      command: |
+        spark-sql --packages org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.0,org.apache.hadoop:hadoop-aws:3.3.4 \
+          --conf spark.sql.catalog.iceberg=org.apache.iceberg.spark.SparkCatalog \
+          --conf spark.sql.catalog.iceberg.type=hive \
+          --conf spark.sql.catalog.iceberg.uri=thrift://metastore.hive-metastore.svc.cluster.local:9083 \
+          --conf spark.sql.catalog.iceberg.warehouse=s3a://warehouse/hive \
+          --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+          -e "CALL iceberg.system.remove_orphan_files(older_than => TIMESTAMP '$(date -d '3 days ago' '+%Y-%m-%d %H:%M:%S')');"
+
+    # Rewrite data files for optimization
+    rewriteDataFiles:
+      enabled: false  # Disabled by default as it's resource intensive
+      schedule: "0 1 * * 6"  # Weekly on Saturday at 1 AM
+      command: |
+        spark-sql --packages org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.0,org.apache.hadoop:hadoop-aws:3.3.4 \
+          --conf spark.sql.catalog.iceberg=org.apache.iceberg.spark.SparkCatalog \
+          --conf spark.sql.catalog.iceberg.type=hive \
+          --conf spark.sql.catalog.iceberg.uri=thrift://metastore.hive-metastore.svc.cluster.local:9083 \
+          --conf spark.sql.catalog.iceberg.warehouse=s3a://warehouse/hive \
+          --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+          -e "CALL iceberg.system.rewrite_data_files(table => 'iceberg.default.your_table_name');"
+
+# Monitoring and alerting
+monitoring:
+  enabled: true
+
+  # Prometheus metrics
+  prometheus:
+    enabled: true
+    port: 8080
+    path: "/metrics"
+
+  # Alerts configuration
+  alerts:
+    enabled: true
+    # Alert when maintenance jobs fail
+    jobFailures: true
+    # Alert when table size grows beyond threshold
+    tableSizeThreshold: "100GB"
+
+# Service account configuration
+serviceAccount:
+  create: true
+  name: "iceberg-maintenance"
+  annotations: {}
+
+# RBAC configuration
+rbac:
+  create: true
+  rules:
+    - apiGroups: [""]
+      resources: ["pods", "configmaps", "secrets"]
+      verbs: ["get", "list", "create", "update", "patch", "delete"]
+    - apiGroups: ["batch"]
+      resources: ["jobs", "cronjobs"]
+      verbs: ["get", "list", "create", "update", "patch", "delete"]
+
+# Network policies
+networkPolicy:
+  enabled: false
+  ingress: []
+  egress: []
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Security context
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+  capabilities:
+    drop:
+      - ALL
+
+# Install-time license gate (templates/tdp-license-check.yaml, the same file in
+# every TDP component chart). helm install/upgrade fails, and an ArgoCD sync
+# fails in its PreSync hook, unless tdp-license-operator is running and a
+# PlatformLicense covering this chart's product is VALID or WARNING. Install the
+# operator and the license first: scripts/tdp-license-install.sh (Helm) or
+# deploy.sh --install (GitOps kit).
+licenseCheck:
+  # Product the license must cover. Empty means the chart name; a PlatformLicense
+  # with spec.product "*" covers every chart.
+  product: ""
+  # How recently the operator must have verified the license, which proves it is
+  # still running (it re-verifies every 30s by default).
+  maxStatusAgeSeconds: 600
+  # Hook Job used when the chart is rendered without cluster access (ArgoCD):
+  # any image with bash, kubectl, grep and GNU date.
+  image: registry.tecnisys.com.br/community/images/bitnamilegacy/kubectl:latest
+  imagePullSecrets:
+    - name: tdp-registry
